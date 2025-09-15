@@ -131,94 +131,71 @@ def infer_transformer_layer_types(model):
 
 @torch.no_grad()
 def sliding_window_ppl(args, model, dataloader, rank):
-    device = torch.device(f"cuda:{rank}")  
+    device = torch.device(f"cuda:{rank}")
     max_amount_of_windows = 10
-    k_tail = 100
+    k_tail = 100  
 
     ppls = torch.zeros(len(args.lengths), device=device)
     valid_ppls = torch.zeros(len(args.lengths), device=device)
 
-    it = iter(dataloader)
-    done = False
-    step = 0
+    for _, batch in enumerate(dataloader):
+        batch_input_ids = batch["input_ids"].to(device, non_blocking=True)
+        seq_len = batch_input_ids.size(1)
 
-    while True:
-        if not done:
-            try:
-                batch = next(it)
-            except StopIteration:
-                done = True
-                batch = None
+        for i, L in enumerate(args.lengths):
+            window_size = int(L)
+            if seq_len < window_size:
+                continue
 
-        if not done:
-            batch_input_ids = batch["input_ids"].to(device, non_blocking=True)
-            seq_len = batch_input_ids.size(1)
+            stride = max(10, (seq_len - window_size) // max_amount_of_windows)
+            nlls = []
 
-            for i, L in enumerate(args.lengths):
-                window_size = int(L)
-                if seq_len < window_size:
+            for begin_loc in range(0, seq_len - window_size, stride):
+                end_loc = begin_loc + window_size
+                input_ids = batch_input_ids[:, begin_loc:end_loc]  # [B, W]
+
+                if "zamba2" in args.model.lower():
+                    outputs = model(input_ids, num_logits_to_keep=k_tail + 1)
+                elif any(k in args.model.lower() for k in ("bamba", "nemotron", "mamba")):
+                    outputs = model(input_ids, num_logits_to_keep=k_tail + 1, use_cache=False)
+                else:
+                    inference_params = {
+                        "max_seqlen": window_size + 1,
+                        "max_batch_size": input_ids.shape[0],
+                        "seqlen_offset": 0,
+                        "batch_size_offset": 0,
+                    }
+                    outputs, _ = model(input_ids, num_last_tokens=k_tail + 1, inference_params=inference_params)
+
+                logits = outputs.logits  # expected [B, T, V]; T may be <= window_size or == k_tail+1
+                B, T_logits, V = logits.shape
+                T_in = input_ids.size(1)
+
+                T = min(T_logits, T_in)
+                logits = logits[:, :T, :]            # [B, T, V]
+                labels_all = input_ids[:, :T]        # [B, T]
+
+                logits_shift = logits[:, :-1, :]     # [B, T-1, V]
+                labels_shift = labels_all[:, 1:]     # [B, T-1]
+                k_eff = min(k_tail, logits_shift.size(1))
+                if k_eff == 0:
                     continue
 
-                stride = max(10, (seq_len - window_size) // max_amount_of_windows)
-                nlls = []
+                logits_tail = logits_shift[:, -k_eff:, :].contiguous()   # [B, k, V]
+                labels_tail = labels_shift[:, -k_eff:].contiguous()      # [B, k]
 
-                for begin_loc in range(0, seq_len - window_size + 1, stride):
-                    end_loc = begin_loc + window_size
-                    input_ids = batch_input_ids[:, begin_loc:end_loc]  # [B, W]
+                loss = F.cross_entropy(
+                    logits_tail.view(-1, V),
+                    labels_tail.view(-1),
+                    reduction="mean",
+                )
+                nlls.append(loss)
 
-                    if "zamba2" in args.model.lower():
-                        outputs = model(input_ids, num_logits_to_keep=k_tail + 1)
-                    elif any(k in args.model.lower() for k in ("bamba", "nemotron", "mamba")):
-                        outputs = model(input_ids, num_logits_to_keep=k_tail + 1, use_cache=False)
-                    else:
-                        inference_params = {
-                            "max_seqlen": window_size + 1,
-                            "max_batch_size": input_ids.shape[0],
-                            "seqlen_offset": 0,
-                            "batch_size_offset": 0,
-                        }
-                        outputs, _ = model(input_ids, num_last_tokens=k_tail + 1, inference_params=inference_params)
+            if nlls:
+                ppls[i] += torch.exp(torch.stack(nlls).mean()).to(torch.float32)
+                valid_ppls[i] += 1
 
-                    logits = outputs.logits  # [B, T, V]
-                    B, T_logits, V = logits.shape
-                    T_in = input_ids.size(1)
-                    T = min(T_logits, T_in)
-
-                    logits = logits[:, :T, :]
-                    labels_all = input_ids[:, :T]
-
-                    logits_shift = logits[:, :-1, :]
-                    labels_shift = labels_all[:, 1:]
-                    k_eff = min(k_tail, logits_shift.size(1))
-                    if k_eff == 0:
-                        continue
-
-                    logits_tail = logits_shift[:, -k_eff:, :].contiguous()
-                    labels_tail = labels_shift[:, -k_eff:].contiguous()
-
-                    loss = F.cross_entropy(
-                        logits_tail.view(-1, V),
-                        labels_tail.view(-1),
-                        reduction="mean",
-                    )
-                    nlls.append(loss)
-
-                if nlls:
-                    ppls[i] += torch.exp(torch.stack(nlls).mean()).to(torch.float32)
-                    valid_ppls[i] += 1
-
-            print((ppls / (valid_ppls + 1e-6)).detach(), flush=True)
-
-        torch.cuda.synchronize()
-        done_flag = torch.tensor(1 if done else 0, device=device, dtype=torch.int32)
-        dist.all_reduce(done_flag, op=dist.ReduceOp.SUM)  # how many ranks are done?
-
-        step += 1
-        if int(done_flag.item()) == dist.get_world_size():
-            break
-        if done:
-            import time
-            time.sleep(0.005)
+        print(ppls/(valid_ppls+1e-6))
 
     dist.all_reduce(ppls, op=dist.ReduceOp.SUM)
     dist.all_reduce(valid_ppls, op=dist.ReduceOp.SUM)
