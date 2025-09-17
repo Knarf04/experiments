@@ -27,7 +27,7 @@ def build_streaming_iterable(hf_iterable, tokenizer, max_length) -> Iterable[Dic
         tok = tokenizer(
             sequence["text"],
             add_special_tokens=False,
-            padding=True,
+            padding="max_length",
             truncation=True,
             max_length=max_length,
             return_attention_mask=True,
@@ -78,7 +78,7 @@ def build_dataloader(args, tokenizer, rank, world_size) -> DataLoader:
             tok = tokenizer(
                 batch["text"],
                 add_special_tokens=False,
-                padding=True,
+                padding="max_length",
                 truncation=True,
                 max_length=args.max_length,
                 return_attention_mask=True,
@@ -129,16 +129,39 @@ def infer_transformer_layer_types(model):
                 candidates.append(type(mod))
     return set(candidates) if candidates else None
 
+def synchronized_dataloader_iterator(dataloader, rank):
+    iterator = iter(dataloader)
+    device = torch.device(f"cuda:{rank}")
+
+    while True:
+        batch = None
+        has_local_data = 1
+        try:
+            batch = next(iterator)
+        except StopIteration:
+            has_local_data = 0
+
+        has_data_tensor = torch.tensor([has_local_data], dtype=torch.int, device=device)
+        dist.all_reduce(has_data_tensor, op=dist.ReduceOp.SUM)
+
+        if has_data_tensor.item() == 0:
+            break
+
+        yield batch
+
 @torch.no_grad()
 def sliding_window_ppl(args, model, dataloader, rank):
     device = torch.device(f"cuda:{rank}")
     max_amount_of_windows = 10
-    k_tail = 100  
+    k_tail = 100
 
     ppls = torch.zeros(len(args.lengths), device=device)
     valid_ppls = torch.zeros(len(args.lengths), device=device)
 
-    for _, batch in enumerate(dataloader):
+    for _, batch in enumerate(synchronized_dataloader_iterator(dataloader, rank)):
+        if batch is None:
+            continue
+
         batch_input_ids = batch["input_ids"].to(device, non_blocking=True)
         seq_len = batch_input_ids.size(1)
 
@@ -196,6 +219,7 @@ def sliding_window_ppl(args, model, dataloader, rank):
                 valid_ppls[i] += 1
 
         print(ppls/(valid_ppls+1e-6))
+        dist.barrier()
 
     dist.all_reduce(ppls, op=dist.ReduceOp.SUM)
     dist.all_reduce(valid_ppls, op=dist.ReduceOp.SUM)
