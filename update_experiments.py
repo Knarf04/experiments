@@ -11,11 +11,10 @@ def update_experiments_config(config_path, updates, reset=False):
     with open(config_path, 'r') as f:
         config = json.load(f)
 
+    experiments_dict = config.setdefault('experiments', {})
     if reset:
-        experiments_dict = {}
-    else:
-        experiments_dict = config.setdefault('experiments', {})
-
+        experiments_dict.clear()
+        
     experiments_dict.update(updates)
 
     print("--- Current Configuration ---")
