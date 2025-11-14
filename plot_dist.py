@@ -12,7 +12,8 @@ def read_jsonl(filepath: str) -> list:
             if not line:
                 continue
             records.append(json.loads(line))
-            break
+            if len(records) == 10:
+                break
     return records
 
 path = "/gpfs/hshen/mmd/mamba2.jsonl"
