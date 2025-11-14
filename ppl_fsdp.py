@@ -75,8 +75,9 @@ def build_dataloader(args, tokenizer, rank, world_size, local_sample_size) -> Da
         )
 
         def tok_fn(batch):
+            texts = batch[args.feature]   # <- use the feature you've kept
             tok = tokenizer(
-                batch["text"],
+                texts,
                 add_special_tokens=False,
                 padding="max_length",
                 truncation=True,
@@ -86,7 +87,7 @@ def build_dataloader(args, tokenizer, rank, world_size, local_sample_size) -> Da
             return {
                 "input_ids": tok["input_ids"],
                 "attention_mask": tok["attention_mask"],
-                "tokenized_len": len(tok["input_ids"])
+                "tokenized_len": [len(x) for x in tok["input_ids"]],
             }
 
         remove_cols = [c for c in raw.column_names if c not in {args.feature}]
@@ -117,7 +118,7 @@ def build_dataloader(args, tokenizer, rank, world_size, local_sample_size) -> Da
         return loader
 
 def infer_transformer_layer_types(model):
-    base = getattr(model, getattr(model, "base_model_prefix", ""), model)
+    base = getattr(model, getattr(model, "base_model_prefix", "backbone"), model)
     candidates = []
     for name in ("layers", "h", "decoder", "encoder", "block", "transformer"):
         mod = getattr(base, name, None)
