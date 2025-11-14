@@ -12,9 +12,14 @@ def read_jsonl(filepath: str) -> list:
             if not line:
                 continue
             records.append(json.loads(line))
-            if len(records) == 100:
+            if len(records) == 10000:
                 break
     return records
+
+with open("/gpfs/hshen/upload/mamba2_erf.json", "r") as f:
+    erf = json.load(f)
+
+print(erf)
 
 path = "/gpfs/hshen/mmd/mamba2.jsonl"
 
@@ -61,9 +66,7 @@ for rec in records:
 for seq_len in forget_dict.keys():
     for layer_idx in forget_dict[seq_len].keys():
         forget_dict[seq_len][layer_idx] /= count[seq_len][layer_idx]
-        forget_dict[seq_len][layer_idx] = np.mean(forget_dict[seq_len][layer_idx], axis=0)
-        forget_dict[seq_len][layer_idx] = forget_dict[seq_len][layer_idx].transpose(1, 0)
-
+        forget_dict[seq_len][layer_idx] = np.mean(forget_dict[seq_len][layer_idx], axis=(0, 1))
 
 print(forget_dict[2048][0].shape)
 print(dt_dict[2048][0].shape)
