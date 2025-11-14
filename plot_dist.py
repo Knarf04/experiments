@@ -92,4 +92,5 @@ y_vals = [forget_dict[seq_len][k] for k in keys]
 plt.scatter(x_vals, y_vals)
 plt.xlabel("ERF")
 plt.ylabel("Average forget gate")
+plt.savefig("/gpfs/hshen/plots/mamba2_forget_dist.png", dpi=600)
 plt.show()
