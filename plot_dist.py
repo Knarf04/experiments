@@ -16,8 +16,17 @@ def read_jsonl(filepath: str) -> list:
                 break
     return records
 
+# load pre-computed ERF
 with open("/gpfs/hshen/upload/mamba2_erf.json", "r") as f:
-    erf = json.load(f)
+    erf_json = json.load(f)
+
+erf = {}
+for sl in erf_json.keys():
+    seq_len = int(sl)
+    erf[seq_len] = {}
+    for li in erf_json[sl].keys():
+        layer_idx = int(li)
+        erf[seq_len][layer_idx] = np.array(erf_json[sl][li])
 
 print(erf)
 
