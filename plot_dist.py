@@ -13,7 +13,7 @@ def read_jsonl(filepath: str) -> list:
             if not line:
                 continue
             records.append(json.loads(line))
-            if len(records) == 1000:
+            if len(records) == 10000:
                 break
     return records
 
@@ -51,7 +51,7 @@ attn_layers = {
 # print("forget shape: ", np.array(records[0]["forget"]).shape)
 # (batch, seqlen, nheads)
 
-# dt_dict = {}
+dt_dict = {}
 forget_dict = {}
 count = {}
 for rec in records:
@@ -61,18 +61,19 @@ for rec in records:
 
     # dt = np.array(rec['dt']).transpose(2, 0, 1)
     # dt = dt.reshape(dt.shape[0], -1)
-
+    dt = np.array(rec['dt'])
     forget = np.array(rec['forget'])
     if seq_len not in forget_dict.keys():
-        # dt_dict[seq_len] = {}
+        dt_dict[seq_len] = {}
         forget_dict[seq_len] = {}
         count[seq_len] = {}
     if layer_idx not in forget_dict[seq_len].keys():
-        # dt_dict[seq_len][layer_idx] = dt
+        dt_dict[seq_len][layer_idx] = dt
         forget_dict[seq_len][layer_idx] = forget
         count[seq_len][layer_idx] = 1
     else:
         # dt_dict[seq_len][layer_idx] = np.concatenate((dt_dict[seq_len][layer_idx], dt), axis=1)
+        dt_dict[seq_len][layer_idx] += dt
         forget_dict[seq_len][layer_idx] += forget
         count[seq_len][layer_idx] += 1
 
@@ -81,7 +82,9 @@ for seq_len in forget_dict.keys():
         forget_dict[seq_len][layer_idx] /= count[seq_len][layer_idx]
         forget_dict[seq_len][layer_idx] = np.mean(forget_dict[seq_len][layer_idx], axis=(0, 1))
 
-print(forget_dict[2048][0].shape)
+        dt_dict[seq_len][layer_idx] /= count[seq_len][layer_idx]
+        dt_dict[seq_len][layer_idx] = np.mean(dt_dict[seq_len][layer_idx], axis=(0, 1))
+
 # print(dt_dict[2048][0].shape)
 
 keys = forget_dict[seq_len].keys()  # d1 and d2 have the same keys
@@ -119,4 +122,40 @@ plt.ylabel("Average forget gate", fontsize=14, fontweight='bold')
 plt.legend()
 
 plt.savefig("/gpfs/hshen/plots/mamba2_forget_dist.png", dpi=600)
+plt.show()
+
+
+x_vals = np.array([erf[seq_len][k] for k in keys])         # ERF
+y_vals = np.array([dt_dict[seq_len][k] for k in keys]) # forget gate
+
+cutoff = np.quantile(all_erf, 0.8)
+
+mask = x_vals >= cutoff   # Top 20%
+
+plt.figure()
+
+# Bottom 80%
+plt.scatter(
+    x_vals[~mask],
+    y_vals[~mask],
+    c="blue",
+    label="Bottom 80%",
+)
+
+# Top 20%
+plt.scatter(
+    x_vals[mask],
+    y_vals[mask],
+    c="red",
+    label="Top 20%",
+)
+
+plt.axvline(cutoff, linestyle="--", linewidth=1)
+
+plt.xlabel("ERF", fontsize=14, fontweight='bold')
+plt.ylabel("$\Delta_t$", fontsize=14, fontweight='bold')
+
+plt.legend()
+
+plt.savefig("/gpfs/hshen/plots/mamba2_dt_dist.png", dpi=600)
 plt.show()
