@@ -124,6 +124,30 @@ plt.legend()
 plt.savefig("/gpfs/hshen/plots/mamba2_forget_dist.png", dpi=600)
 plt.show()
 
+# Histograms of y values (forget gate) for bottom 80% vs top 20%
+plt.figure()
+
+plt.hist(
+    y_vals[~mask],
+    bins=30,
+    alpha=0.6,
+    label="Bottom 80%",
+)
+plt.hist(
+    y_vals[mask],
+    bins=30,
+    alpha=0.6,
+    label="Top 20%",
+)
+
+plt.xlabel("Average forget gate", fontsize=14, fontweight='bold')
+plt.ylabel("Count", fontsize=14, fontweight='bold')
+plt.title("Forget gate distribution by ERF percentile", fontsize=14, fontweight='bold')
+plt.legend()
+
+plt.savefig("/gpfs/hshen/plots/mamba2_forget_hist.png", dpi=600)
+plt.show()
+
 
 x_vals = np.array([erf[seq_len][k] for k in keys])         # ERF
 y_vals = np.array([dt_dict[seq_len][k] for k in keys]) # forget gate
@@ -158,4 +182,27 @@ plt.ylabel("$\Delta_t$", fontsize=14, fontweight='bold')
 plt.legend()
 
 plt.savefig("/gpfs/hshen/plots/mamba2_dt_dist.png", dpi=600)
+plt.show()
+
+plt.figure()
+
+plt.hist(
+    y_vals[~mask],
+    bins=30,
+    alpha=0.6,
+    label="Bottom 80%",
+)
+plt.hist(
+    y_vals[mask],
+    bins=30,
+    alpha=0.6,
+    label="Top 20%",
+)
+
+plt.xlabel(r"$\Delta_t$", fontsize=14, fontweight='bold')
+plt.ylabel("Count", fontsize=14, fontweight='bold')
+plt.title(r"$\Delta_t$ distribution by ERF percentile", fontsize=14, fontweight='bold')
+plt.legend()
+
+plt.savefig("/gpfs/hshen/plots/mamba2_dt_hist.png", dpi=600)
 plt.show()
