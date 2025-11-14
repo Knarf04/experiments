@@ -22,10 +22,28 @@ from torch.distributed.fsdp import ShardingStrategy, CPUOffload
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
 
-def build_streaming_iterable(hf_iterable, tokenizer, max_length) -> Iterable[Dict[str, list]]:
-    for sequence in hf_iterable:
+# CHANGED: add feature_name, world_size, rank, local_sample_size and DDP-aware sharding
+def build_streaming_iterable(
+    hf_iterable,
+    tokenizer,
+    max_length,
+    feature_name: str,
+    world_size: int,
+    rank: int,
+    local_sample_size: int,
+) -> Iterable[Dict[str, list]]:
+    processed = 0
+    for idx, sequence in enumerate(hf_iterable):
+        # simple per-sample sharding by index
+        if idx % world_size != rank:
+            continue
+
+        if local_sample_size > 0 and processed >= local_sample_size:
+            break
+
+        text = sequence[feature_name]  # CHANGED: use configurable feature, not hard-coded "text"
         tok = tokenizer(
-            sequence["text"],
+            text,
             add_special_tokens=False,
             padding="max_length",
             truncation=True,
@@ -35,8 +53,10 @@ def build_streaming_iterable(hf_iterable, tokenizer, max_length) -> Iterable[Dic
         yield {
             "input_ids": tok["input_ids"],
             "attention_mask": tok["attention_mask"],
-            "tokenized_len": len(tok["input_ids"])
+            "tokenized_len": len(tok["input_ids"]),
         }
+        processed += 1
+
 
 def build_dataloader(args, tokenizer, rank, world_size, local_sample_size) -> DataLoader:
     if args.streaming:
@@ -47,20 +67,33 @@ def build_dataloader(args, tokenizer, rank, world_size, local_sample_size) -> Da
             streaming=True,
             trust_remote_code=True,
         )
-        raw = raw.shard(num_shards=world_size, index=rank)
+
+        # CHANGED: remove .shard(); not supported in streaming mode
+        # raw = raw.shard(num_shards=world_size, index=rank)
+
         if args.shuffle_buffer > 0:
             raw = raw.shuffle(seed=args.seed, buffer_size=args.shuffle_buffer)
 
+        # CHANGED: wrap HF iterable with our DDP-aware, tokenizing generator
         tokenized_iterable = datasets.IterableDataset.from_generator(
-            lambda: build_streaming_iterable(raw, tokenizer, args.max_length)
+            lambda: build_streaming_iterable(
+                hf_iterable=raw,
+                tokenizer=tokenizer,
+                max_length=args.max_length,
+                feature_name=args.feature,
+                world_size=world_size,
+                rank=rank,
+                local_sample_size=local_sample_size,
+            )
         )
+
         collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
         loader = DataLoader(
             tokenized_iterable,
             batch_size=args.batch_size,
             shuffle=False,
-            num_workers=0,
+            num_workers=0,  # CHANGED: generator + multiprocessing is messy; keep 0
             pin_memory=True,
             collate_fn=collator,
         )
@@ -75,7 +108,7 @@ def build_dataloader(args, tokenizer, rank, world_size, local_sample_size) -> Da
         )
 
         def tok_fn(batch):
-            texts = batch[args.feature]   # <- use the feature you've kept
+            texts = batch[args.feature]
             tok = tokenizer(
                 texts,
                 add_special_tokens=False,
@@ -117,6 +150,7 @@ def build_dataloader(args, tokenizer, rank, world_size, local_sample_size) -> Da
         )
         return loader
 
+
 def infer_transformer_layer_types(model):
     base = getattr(model, getattr(model, "base_model_prefix", "backbone"), model)
     candidates = []
@@ -129,6 +163,7 @@ def infer_transformer_layer_types(model):
             else:
                 candidates.append(type(mod))
     return set(candidates) if candidates else None
+
 
 def synchronized_dataloader_iterator(dataloader, rank):
     iterator = iter(dataloader)
@@ -149,6 +184,7 @@ def synchronized_dataloader_iterator(dataloader, rank):
             break
 
         yield batch
+
 
 @torch.no_grad()
 def sliding_window_ppl(args, model, dataloader, rank):
@@ -219,7 +255,7 @@ def sliding_window_ppl(args, model, dataloader, rank):
                 ppls[i] += torch.exp(torch.stack(nlls).mean()).to(torch.float32)
                 valid_ppls[i] += 1
 
-        print(ppls/(valid_ppls+1e-6))
+        print(ppls / (valid_ppls + 1e-6))
         dist.barrier()
 
     dist.all_reduce(ppls, op=dist.ReduceOp.SUM)
@@ -266,7 +302,7 @@ def main():
     # lengths = [131072, 65536, 32768, 16384, 8192, 4096, 2048]
     # args.lengths = [int(L) for L in lengths if int(L) <= args.max_length]
     args.lengths = [2048]
-    
+
     local_sample_size = args.sample_size // world_size + int(rank < args.sample_size % world_size)
 
     # DataLoader (on-the-fly tokenization)
@@ -288,10 +324,11 @@ def main():
         model.config.use_cache = False
 
     # FSDP wrapping
-    base = getattr(model, model.base_model_prefix)
+    # CHANGED: use infer_transformer_layer_types to make this robust
+    layer_types = infer_transformer_layer_types(model) or set()
     auto_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
-        transformer_layer_cls={type(layer) for layer in base.layers},
+        transformer_layer_cls=layer_types,
     )
 
     fsdp_model = FSDP(
@@ -300,7 +337,7 @@ def main():
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         cpu_offload=CPUOffload(offload_params=True) if args.cpu_offload else None,
         auto_wrap_policy=auto_wrap_policy,
-        limit_all_gathers=True
+        limit_all_gathers=True,
     )
 
     try:
