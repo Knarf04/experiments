@@ -301,7 +301,7 @@ def main():
 
     # lengths = [131072, 65536, 32768, 16384, 8192, 4096, 2048]
     # args.lengths = [int(L) for L in lengths if int(L) <= args.max_length]
-    args.lengths = [4096]
+    args.lengths = [8192]
 
     local_sample_size = args.sample_size // world_size + int(rank < args.sample_size % world_size)
 
