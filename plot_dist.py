@@ -127,15 +127,16 @@ plt.show()
 # Histograms of y values (forget gate) for bottom 80% vs top 20%
 plt.figure()
 
+bins = np.linspace(y_vals.min(), y_vals.max(), 31)
 plt.hist(
     y_vals[~mask],
-    bins=30,
+    bins=bins,
     alpha=0.6,
     label="Bottom 80%",
 )
 plt.hist(
     y_vals[mask],
-    bins=30,
+    bins=bins,
     alpha=0.6,
     label="Top 20%",
 )
@@ -186,15 +187,16 @@ plt.show()
 
 plt.figure()
 
+bins = np.linspace(y_vals.min(), y_vals.max(), 31)
 plt.hist(
     y_vals[~mask],
-    bins=30,
+    bins=bins,
     alpha=0.6,
     label="Bottom 80%",
 )
 plt.hist(
     y_vals[mask],
-    bins=30,
+    bins=bins,
     alpha=0.6,
     label="Top 20%",
 )
