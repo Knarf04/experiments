@@ -38,7 +38,7 @@ def build_streaming_iterable(hf_iterable, tokenizer, max_length) -> Iterable[Dic
             "tokenized_len": len(tok["input_ids"])
         }
 
-def build_dataloader(args, tokenizer, rank, world_size) -> DataLoader:
+def build_dataloader(args, tokenizer, rank, world_size, local_sample_size) -> DataLoader:
     if args.streaming:
         raw = datasets.load_dataset(
             args.dataset,
@@ -235,6 +235,7 @@ def main():
     parser.add_argument("--dataset", type=str, required=True, help='HF dataset id or local script, e.g. "pg19"')
     parser.add_argument("--subset", type=str, default=None)
     parser.add_argument("--split", type=str, default="validation")
+    parser.add_argument("--sample-size", type=int, default=0, help="Number of data points sampled from the dataset.")
     parser.add_argument("--feature", type=str, default="text", help="Text column name")
     parser.add_argument("--streaming", action="store_true", help="Use HF streaming (recommended for large datasets).")
     parser.add_argument("--shuffle-buffer", type=int, default=0, help="Streaming shuffle buffer size; 0 = no shuffle.")
@@ -261,11 +262,14 @@ def main():
         tokenizer.pad_token = getattr(tokenizer, "eos_token", tokenizer.unk_token)
     tokenizer.padding_side = "left"
 
-    lengths = [131072, 65536, 32768, 16384, 8192, 4096, 2048]
-    args.lengths = [int(L) for L in lengths if int(L) <= args.max_length]
+    # lengths = [131072, 65536, 32768, 16384, 8192, 4096, 2048]
+    # args.lengths = [int(L) for L in lengths if int(L) <= args.max_length]
+    args.lengths = [2048]
+    
+    local_sample_size = args.sample_size // world_size + int(rank < args.sample_size % world_size)
 
     # DataLoader (on-the-fly tokenization)
-    dataloader = build_dataloader(args, tokenizer, rank, world_size)
+    dataloader = build_dataloader(args, tokenizer, rank, world_size, local_sample_size)
 
     # Model
     torch.manual_seed(args.seed)

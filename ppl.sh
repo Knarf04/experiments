@@ -20,6 +20,7 @@ torchrun --standalone --nproc_per_node=4 ppl_fsdp.py \
     --model ${MODEL_DIR} \
     --dataset ${DATASET_DIR} \
     --split validation \
+    --sample-size 48 \
     --streaming \
     --max-length 65537 \
     --batch-size 1 \
