@@ -12,7 +12,7 @@ def read_jsonl(filepath: str) -> list:
             if not line:
                 continue
             records.append(json.loads(line))
-            if len(records) == 10:
+            if len(records) == 100:
                 break
     return records
 
@@ -29,8 +29,9 @@ attn_layers = {
     "mamba2": [],
 }
 
-print("dt shape:", np.array(records[0]["dt"]).shape)
-print("forget shape: ", np.array(records[0]["forget"]).shape)
+# print("dt shape:", np.array(records[0]["dt"]).shape)
+# print("forget shape: ", np.array(records[0]["forget"]).shape)
+# (batch, seqlen, nheads)
 
 dt_dict = {}
 forget_dict = {}
@@ -39,7 +40,10 @@ for rec in records:
     layer_idx = rec['layer_idx']
     if layer_idx in attn_layers[model_type]:
         continue
-    dt = np.array(rec['dt'])
+
+    dt = np.array(rec['dt']).transpose(2, 0, 1)
+    dt = dt.reshape(dt.shape[0], -1)
+
     forget = np.array(rec['forget'])
     if seq_len not in dt_dict.keys():
         dt_dict[seq_len] = {}
@@ -47,15 +51,19 @@ for rec in records:
         count[seq_len] = {}
     if layer_idx not in dt_dict[seq_len].keys():
         dt_dict[seq_len][layer_idx] = dt
-        forget_dict[seq_len] = forget
+        forget_dict[seq_len][layer_idx] = forget
         count[seq_len][layer_idx] = 1
     else:
-        dt_dict[seq_len][layer_idx] += dt
-        forget_dict[seq_len] += forget
+        dt_dict[seq_len][layer_idx] = np.concatenate((dt_dict[seq_len][layer_idx], dt), axis=1)
+        forget_dict[seq_len][layer_idx] += forget
         count[seq_len][layer_idx] += 1
         
 for seq_len in forget_dict.keys():
     for layer_idx in forget_dict[seq_len].keys():
         forget_dict[seq_len][layer_idx] /= count[seq_len][layer_idx]
+        forget_dict[seq_len][layer_idx] = np.mean(forget_dict[seq_len][layer_idx], axis=0)
+        forget_dict[seq_len][layer_idx] = forget_dict[seq_len][layer_idx].transpose(1, 0)
 
-print(forget_dict)
+
+print(forget_dict[2048][0].shape)
+print(dt_dict[2048][0].shape)
