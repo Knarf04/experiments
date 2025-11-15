@@ -88,7 +88,7 @@ for seq_len in forget_dict.keys():
 # print(dt_dict[2048][0].shape)
 
 keys = forget_dict[seq_len].keys()  # d1 and d2 have the same keys
-x_min, x_max = -5.8, 7.1
+x_min, x_max = -4, 7.1
 y_min, y_max = -7.5, 7.5
 
 # generic interval mapping
@@ -97,7 +97,7 @@ x_vals = np.array([y_min + (np.log(erf[seq_len][k]) - x_min) * (y_max - y_min) /
 y_vals = np.array([forget_dict[seq_len][k] for k in keys]) # forget gate
 
 # cutoff = np.log(np.quantile(all_erf, 0.8))
-cutoff = 4.6
+cutoff = 4.8
 mask = x_vals >= cutoff   # Top 20%
 
 plt.figure()
@@ -162,7 +162,7 @@ x_vals = np.array([y_min + (np.log(erf[seq_len][k]) - x_min) * (y_max - y_min) /
 y_vals = np.array([dt_dict[seq_len][k] for k in keys]) # forget gate
 
 # cutoff = np.log(np.quantile(all_erf, 0.8))
-cutoff = 4.6
+cutoff = 4.8
 
 mask = x_vals >= cutoff   # Top 20%
 
