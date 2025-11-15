@@ -92,9 +92,9 @@ keys = forget_dict[seq_len].keys()  # d1 and d2 have the same keys
 x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])         # ERF
 y_vals = np.array([forget_dict[seq_len][k] for k in keys]) # forget gate
 
-cutoff = np.quantile(all_erf, 0.8)
+cutoff = np.log(np.quantile(all_erf, 0.8))
 
-mask = x_vals >= np.log(cutoff)   # Top 20%
+mask = x_vals >= cutoff   # Top 20%
 
 plt.figure()
 
@@ -155,9 +155,9 @@ plt.show()
 x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])         # ERF
 y_vals = np.array([dt_dict[seq_len][k] for k in keys]) # forget gate
 
-cutoff = np.quantile(all_erf, 0.8)
+cutoff = np.log(np.quantile(all_erf, 0.8))
 
-mask = x_vals >= np.log(cutoff)   # Top 20%
+mask = x_vals >= cutoff   # Top 20%
 
 plt.figure()
 
