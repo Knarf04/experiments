@@ -103,6 +103,7 @@ plt.scatter(
     x_vals[~mask],
     y_vals[~mask],
     c="blue",
+    marker='.', 
     s=10,
     label="Bottom 80%",
 )
@@ -112,6 +113,7 @@ plt.scatter(
     x_vals[mask],
     y_vals[mask],
     c="red",
+    marker='.', 
     s=10,
     label="Top 20%",
 )
@@ -166,6 +168,7 @@ plt.scatter(
     x_vals[~mask],
     y_vals[~mask],
     c="blue",
+    marker='.', 
     s=10,
     label="Bottom 80%",
 )
@@ -175,6 +178,7 @@ plt.scatter(
     x_vals[mask],
     y_vals[mask],
     c="red",
+    marker='.', 
     s=10,
     label="Top 20%",
 )
