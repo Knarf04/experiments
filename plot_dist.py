@@ -18,7 +18,7 @@ def read_jsonl(filepath: str) -> list:
     return records
 
 # load pre-computed ERF
-with open("/gpfs/hshen/upload/bamba2_erf.json", "r") as f:
+with open("/gpfs/hshen/upload/mamba2_erf.json", "r") as f:
     erf_json = json.load(f)
 
 erf = {}
@@ -34,13 +34,13 @@ all_erf = np.array(all_erf)
 cutoff = np.quantile(all_erf, 0.8)
 print("Top 20% ERF cutoff:", cutoff)
 
-path = "/gpfs/hshen/mmd/bamba2.jsonl"
+path = "/gpfs/hshen/mmd/mamba2.jsonl"
 
 records = read_jsonl(path)
 print(f"Loaded {len(records)} records via json module")
 
-model_type = "bamba2"
-seq_len = 4096
+model_type = "mamba2"
+seq_len = 2048
 attn_layers = {
     "bamba": [9, 18, 27],
     "nemotron-h": [7, 18, 29, 40],
@@ -88,12 +88,16 @@ for seq_len in forget_dict.keys():
 # print(dt_dict[2048][0].shape)
 
 keys = forget_dict[seq_len].keys()  # d1 and d2 have the same keys
+x_min, x_max = -5.8, 7.1
+y_min, y_max = -7.5, 7.5
 
-x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])         # ERF
+# generic interval mapping
+
+x_vals = np.array([y_min + (np.log(erf[seq_len][k]) - x_min) * (y_max - y_min) / (x_max - x_min) for k in keys])         # ERF
 y_vals = np.array([forget_dict[seq_len][k] for k in keys]) # forget gate
 
-cutoff = np.log(np.quantile(all_erf, 0.8))
-
+# cutoff = np.log(np.quantile(all_erf, 0.8))
+cutoff = 4.6
 mask = x_vals >= cutoff   # Top 20%
 
 plt.figure()
@@ -125,7 +129,7 @@ plt.ylabel("Average forget gate", fontsize=14, fontweight='bold')
 
 plt.legend()
 
-plt.savefig(f"/gpfs/hshen/plots/{model_type}_forget_dist.png", dpi=600)
+plt.savefig("/gpfs/hshen/plots/mamba2_forget_dist.png", dpi=600)
 plt.show()
 
 # Histograms of y values (forget gate) for bottom 80% vs top 20%
@@ -150,14 +154,15 @@ plt.ylabel("Count", fontsize=14, fontweight='bold')
 # plt.title("Forget gate distribution by ERF percentile", fontsize=14, fontweight='bold')
 plt.legend()
 
-plt.savefig(f"/gpfs/hshen/plots/{model_type}_forget_hist.png", dpi=600)
+plt.savefig("/gpfs/hshen/plots/mamba2_forget_hist.png", dpi=600)
 plt.show()
 
 
-x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])         # ERF
+x_vals = np.array([y_min + (np.log(erf[seq_len][k]) - x_min) * (y_max - y_min) / (x_max - x_min) for k in keys])         # ERF
 y_vals = np.array([dt_dict[seq_len][k] for k in keys]) # forget gate
 
-cutoff = np.log(np.quantile(all_erf, 0.8))
+# cutoff = np.log(np.quantile(all_erf, 0.8))
+cutoff = 4.6
 
 mask = x_vals >= cutoff   # Top 20%
 
@@ -190,7 +195,7 @@ plt.ylabel("$\Delta_t$", fontsize=14, fontweight='bold')
 
 plt.legend()
 
-plt.savefig(f"/gpfs/hshen/plots/{model_type}_dt_dist.png", dpi=600)
+plt.savefig("/gpfs/hshen/plots/mamba2_dt_dist.png", dpi=600)
 plt.show()
 
 plt.figure()
@@ -213,5 +218,5 @@ plt.xlabel(r"$\Delta_t$", fontsize=14, fontweight='bold')
 plt.ylabel("Count", fontsize=14, fontweight='bold')
 plt.legend()
 
-plt.savefig(f"/gpfs/hshen/plots/{model_type}_dt_hist.png", dpi=600)
+plt.savefig("/gpfs/hshen/plots/mamba2_dt_hist.png", dpi=600)
 plt.show()
