@@ -18,7 +18,7 @@ def read_jsonl(filepath: str) -> list:
     return records
 
 # load pre-computed ERF
-with open("/gpfs/hshen/upload/mamba2_erf.json", "r") as f:
+with open("/gpfs/hshen/upload/bamba2_erf.json", "r") as f:
     erf_json = json.load(f)
 
 erf = {}
@@ -34,13 +34,13 @@ all_erf = np.array(all_erf)
 cutoff = np.quantile(all_erf, 0.8)
 print("Top 20% ERF cutoff:", cutoff)
 
-path = "/gpfs/hshen/mmd/mamba2.jsonl"
+path = "/gpfs/hshen/mmd/bamba2.jsonl"
 
 records = read_jsonl(path)
 print(f"Loaded {len(records)} records via json module")
 
-model_type = "mamba2"
-seq_len = 2048
+model_type = "bamba2"
+seq_len = 4096
 attn_layers = {
     "bamba": [9, 18, 27],
     "nemotron-h": [7, 18, 29, 40],
@@ -125,7 +125,7 @@ plt.ylabel("Average forget gate", fontsize=14, fontweight='bold')
 
 plt.legend()
 
-plt.savefig("/gpfs/hshen/plots/mamba2_forget_dist.png", dpi=600)
+plt.savefig(f"/gpfs/hshen/plots/{model_type}_forget_dist.png", dpi=600)
 plt.show()
 
 # Histograms of y values (forget gate) for bottom 80% vs top 20%
@@ -147,10 +147,10 @@ plt.hist(
 
 plt.xlabel("Average forget gate", fontsize=14, fontweight='bold')
 plt.ylabel("Count", fontsize=14, fontweight='bold')
-plt.title("Forget gate distribution by ERF percentile", fontsize=14, fontweight='bold')
+# plt.title("Forget gate distribution by ERF percentile", fontsize=14, fontweight='bold')
 plt.legend()
 
-plt.savefig("/gpfs/hshen/plots/mamba2_forget_hist.png", dpi=600)
+plt.savefig(f"/gpfs/hshen/plots/{model_type}_forget_hist.png", dpi=600)
 plt.show()
 
 
@@ -190,7 +190,7 @@ plt.ylabel("$\Delta_t$", fontsize=14, fontweight='bold')
 
 plt.legend()
 
-plt.savefig("/gpfs/hshen/plots/mamba2_dt_dist.png", dpi=600)
+plt.savefig(f"/gpfs/hshen/plots/{model_type}_dt_dist.png", dpi=600)
 plt.show()
 
 plt.figure()
@@ -213,5 +213,5 @@ plt.xlabel(r"$\Delta_t$", fontsize=14, fontweight='bold')
 plt.ylabel("Count", fontsize=14, fontweight='bold')
 plt.legend()
 
-plt.savefig("/gpfs/hshen/plots/mamba2_dt_hist.png", dpi=600)
+plt.savefig(f"/gpfs/hshen/plots/{model_type}_dt_hist.png", dpi=600)
 plt.show()
