@@ -89,12 +89,12 @@ for seq_len in forget_dict.keys():
 
 keys = forget_dict[seq_len].keys()  # d1 and d2 have the same keys
 
-x_vals = np.array([erf[seq_len][k] for k in keys])         # ERF
+x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])         # ERF
 y_vals = np.array([forget_dict[seq_len][k] for k in keys]) # forget gate
 
 cutoff = np.quantile(all_erf, 0.8)
 
-mask = x_vals >= cutoff   # Top 20%
+mask = x_vals >= np.log(cutoff)   # Top 20%
 
 plt.figure()
 
@@ -103,6 +103,7 @@ plt.scatter(
     x_vals[~mask],
     y_vals[~mask],
     c="blue",
+    s=10,
     label="Bottom 80%",
 )
 
@@ -111,12 +112,13 @@ plt.scatter(
     x_vals[mask],
     y_vals[mask],
     c="red",
+    s=10,
     label="Top 20%",
 )
 
 plt.axvline(cutoff, linestyle="--", linewidth=1)
 
-plt.xlabel("ERF", fontsize=14, fontweight='bold')
+plt.xlabel("log-ERF", fontsize=14, fontweight='bold')
 plt.ylabel("Average forget gate", fontsize=14, fontweight='bold')
 
 plt.legend()
@@ -127,7 +129,7 @@ plt.show()
 # Histograms of y values (forget gate) for bottom 80% vs top 20%
 plt.figure()
 
-bins = np.linspace(y_vals.min(), y_vals.max(), 31)
+bins = np.linspace(y_vals.min(), y_vals.max(), 61)
 plt.hist(
     y_vals[~mask],
     bins=bins,
@@ -150,12 +152,12 @@ plt.savefig("/gpfs/hshen/plots/mamba2_forget_hist.png", dpi=600)
 plt.show()
 
 
-x_vals = np.array([erf[seq_len][k] for k in keys])         # ERF
+x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])         # ERF
 y_vals = np.array([dt_dict[seq_len][k] for k in keys]) # forget gate
 
 cutoff = np.quantile(all_erf, 0.8)
 
-mask = x_vals >= cutoff   # Top 20%
+mask = x_vals >= np.log(cutoff)   # Top 20%
 
 plt.figure()
 
@@ -164,6 +166,7 @@ plt.scatter(
     x_vals[~mask],
     y_vals[~mask],
     c="blue",
+    s=10,
     label="Bottom 80%",
 )
 
@@ -172,12 +175,13 @@ plt.scatter(
     x_vals[mask],
     y_vals[mask],
     c="red",
+    s=10,
     label="Top 20%",
 )
 
 plt.axvline(cutoff, linestyle="--", linewidth=1)
 
-plt.xlabel("ERF", fontsize=14, fontweight='bold')
+plt.xlabel("log-ERF", fontsize=14, fontweight='bold')
 plt.ylabel("$\Delta_t$", fontsize=14, fontweight='bold')
 
 plt.legend()
@@ -187,7 +191,7 @@ plt.show()
 
 plt.figure()
 
-bins = np.linspace(y_vals.min(), y_vals.max(), 31)
+bins = np.linspace(y_vals.min(), y_vals.max(), 61)
 plt.hist(
     y_vals[~mask],
     bins=bins,
@@ -203,7 +207,6 @@ plt.hist(
 
 plt.xlabel(r"$\Delta_t$", fontsize=14, fontweight='bold')
 plt.ylabel("Count", fontsize=14, fontweight='bold')
-plt.title(r"$\Delta_t$ distribution by ERF percentile", fontsize=14, fontweight='bold')
 plt.legend()
 
 plt.savefig("/gpfs/hshen/plots/mamba2_dt_hist.png", dpi=600)
