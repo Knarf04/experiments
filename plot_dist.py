@@ -61,6 +61,11 @@ forget_sum_head = {}
 forget_sumsq_head = {}
 forget_n_head = {}
 
+# per-head accumulators for dt (Δt) statistics
+dt_sum_head = {}
+dt_sumsq_head = {}
+dt_n_head = {}
+
 for rec in records:
     layer_idx = rec['layer_idx']
     if layer_idx in attn_layers[model_type]:
@@ -83,7 +88,7 @@ for rec in records:
         forget_dict[seq_len][layer_idx] += forget
         count[seq_len][layer_idx] += 1
 
-    # ---- NEW: per-head statistics for forget (mean + variance) ----
+    # ---- per-head statistics for forget (mean + variance) ----
     if seq_len not in forget_sum_head:
         forget_sum_head[seq_len] = {}
         forget_sumsq_head[seq_len] = {}
@@ -100,13 +105,31 @@ for rec in records:
     forget_sumsq_head[seq_len][layer_idx] += (f_flat ** 2).sum(axis=0)
     forget_n_head[seq_len][layer_idx]     += f_flat.shape[0]
 
-# ---- compute per-head means for forget and dt, and per-head variances for forget ----
+    # ---- per-head statistics for dt (Δt) mean + variance ----
+    if seq_len not in dt_sum_head:
+        dt_sum_head[seq_len] = {}
+        dt_sumsq_head[seq_len] = {}
+        dt_n_head[seq_len] = {}
+
+    if layer_idx not in dt_sum_head[seq_len]:
+        B, T, H = dt.shape
+        dt_sum_head[seq_len][layer_idx] = np.zeros(H, dtype=np.float64)
+        dt_sumsq_head[seq_len][layer_idx] = np.zeros(H, dtype=np.float64)
+        dt_n_head[seq_len][layer_idx] = 0
+
+    d_flat = dt.reshape(-1, dt.shape[-1])  # (B*T, H)
+    dt_sum_head[seq_len][layer_idx]   += d_flat.sum(axis=0)
+    dt_sumsq_head[seq_len][layer_idx] += (d_flat ** 2).sum(axis=0)
+    dt_n_head[seq_len][layer_idx]     += d_flat.shape[0]
+
+# ---- compute per-head means for forget and dt, and per-head variances for forget and dt ----
 
 forget_mean_dict = {}
 forget_var_dict = {}
 dt_mean_dict = {}
+dt_var_dict = {}
 
-# dt_mean: as before, from accumulated sums
+# dt_mean: as before, from accumulated sums over full tensors
 for sl in dt_dict.keys():
     dt_mean_dict[sl] = {}
     for layer_idx in dt_dict[sl].keys():
@@ -127,6 +150,22 @@ for sl in forget_sum_head.keys():
 
         forget_mean_dict[sl][layer_idx] = mean   # (H,)
         forget_var_dict[sl][layer_idx]  = var    # (H,)
+
+# dt variance (and optionally mean) from per-head aggregates
+for sl in dt_sum_head.keys():
+    if sl not in dt_var_dict:
+        dt_var_dict[sl] = {}
+    for layer_idx in dt_sum_head[sl].keys():
+        s  = dt_sum_head[sl][layer_idx]
+        s2 = dt_sumsq_head[sl][layer_idx]
+        n  = dt_n_head[sl][layer_idx]
+
+        mean = s / n
+        var  = s2 / n - mean**2
+
+        # overwrite dt_mean_dict with per-head mean from per-head stats (optional but consistent)
+        dt_mean_dict[sl][layer_idx] = mean
+        dt_var_dict[sl][layer_idx]  = var
 
 # ---------------- PLOTTING ----------------
 
@@ -173,21 +212,15 @@ plt.show()
 # Histograms of per-head mean forget gate (bottom 80% vs top 20%)
 plt.figure()
 
-# 0 to 0.6, split into 30 bins ⇒ 31 edges
-bins = np.linspace(0.0, 0.6, 31)
-
-# clip so values <0 go to 0, >0.6 go to 0.6
-y_bottom = np.clip(y_vals[~mask], 0.0, 0.6)
-y_top    = np.clip(y_vals[mask],   0.0, 0.6)
-
+bins = np.linspace(y_vals.min(), y_vals.max(), 61)
 plt.hist(
-    y_bottom,
+    y_vals[~mask],
     bins=bins,
     alpha=0.6,
     label="Bottom 80%",
 )
 plt.hist(
-    y_top,
+    y_vals[mask],
     bins=bins,
     alpha=0.6,
     label="Top 20%",
@@ -195,27 +228,25 @@ plt.hist(
 
 plt.xlabel("Average forget gate", fontsize=14, fontweight='bold')
 plt.ylabel("Count", fontsize=14, fontweight='bold')
-plt.xlim(0.0, 0.6)
 plt.legend()
 
 plt.savefig(f"/gpfs/hshen/plots/{model_type}_forget_hist.png", dpi=600)
 plt.show()
 
-
-# NEW: histogram of per-head variance of forget gate (bottom 80% vs top 20%)
+# Histogram of per-head variance of forget gate (bottom 80% vs top 20%)
 plt.figure()
 
-var_vals = np.array([forget_var_dict[seq_len][k] for k in keys])
+var_vals_forget = np.array([forget_var_dict[seq_len][k] for k in keys])
 
-bins = np.linspace(var_vals.min(), var_vals.max(), 61)
+bins = np.linspace(var_vals_forget.min(), var_vals_forget.max(), 61)
 plt.hist(
-    var_vals[~mask],
+    var_vals_forget[~mask],
     bins=bins,
     alpha=0.6,
     label="Bottom 80%",
 )
 plt.hist(
-    var_vals[mask],
+    var_vals_forget[mask],
     bins=bins,
     alpha=0.6,
     label="Top 20%",
@@ -266,10 +297,10 @@ plt.legend()
 plt.savefig(f"/gpfs/hshen/plots/{model_type}_dt_dist.png", dpi=600)
 plt.show()
 
-# Histogram of per-head mean Δt
+# Histogram of per-head mean Δt, binned between 0 and 0.6 for 30 bins
 plt.figure()
 
-bins = np.linspace(y_vals.min(), y_vals.max(), 61)
+bins = np.linspace(0.0, 0.6, 31)  # 30 bins between 0 and 0.6
 plt.hist(
     y_vals[~mask],
     bins=bins,
@@ -288,4 +319,30 @@ plt.ylabel("Count", fontsize=14, fontweight='bold')
 plt.legend()
 
 plt.savefig(f"/gpfs/hshen/plots/{model_type}_dt_hist.png", dpi=600)
+plt.show()
+
+# NEW: histogram of per-head variance of Δt (bottom 80% vs top 20%)
+plt.figure()
+
+var_vals_dt = np.array([dt_var_dict[seq_len][k] for k in keys])
+
+bins = np.linspace(var_vals_dt.min(), var_vals_dt.max(), 61)
+plt.hist(
+    var_vals_dt[~mask],
+    bins=bins,
+    alpha=0.6,
+    label="Bottom 80%",
+)
+plt.hist(
+    var_vals_dt[mask],
+    bins=bins,
+    alpha=0.6,
+    label="Top 20%",
+)
+
+plt.xlabel(r"Variance of $\Delta_t$", fontsize=14, fontweight='bold')
+plt.ylabel("Count", fontsize=14, fontweight='bold')
+plt.legend()
+
+plt.savefig(f"/gpfs/hshen/plots/{model_type}_dt_var_hist.png", dpi=600)
 plt.show()
