@@ -350,7 +350,7 @@ plt.show()
 
 
 # ---------------- PLOTTING ----------------
-
+plt.figure()
 keys = forget_mean_dict[seq_len].keys()
 
 # log-ERF vs average forget gate
@@ -358,7 +358,12 @@ x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])          # log-ERF
 y_vals = np.array([forget_mean_dict[seq_len][k] for k in keys])     # per-head mean forget
 
 xy = x_vals * y_vals
-xy = xy/np.max(xy) * 1.24
+
+lo, hi = 0.35, 1.24
+xy_min = np.min(xy)
+xy_max = np.max(xy)
+xy = (xy - xy_min) / (xy_max - xy_min)
+xy = lo + xy * (hi - lo) 
 
 cutoff = np.log(np.quantile(all_erf, 0.8))
 mask = x_vals >= cutoff   # Top 20%
