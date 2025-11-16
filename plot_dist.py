@@ -2,8 +2,8 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 
-model_type = "bamba2"
-seq_len = 4096   # target sequence length for plotting
+model_type = "mamba2"
+seq_len = 2048   # target sequence length for plotting
 
 def read_jsonl(filepath: str) -> list:
     """
