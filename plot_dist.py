@@ -306,8 +306,8 @@ plt.show()
 # Histogram of per-head mean Δt, binned between 0 and 0.6 for 30 bins
 plt.figure()
 
-cutoff = np.quantile(y_vals, 0.8)
-mask_dt = y_vals >= cutoff   # Top 20%
+cutoff = np.quantile(y_vals, 0.2)
+mask_dt = y_vals < cutoff   # Top 20%
 
 bins = np.linspace(y_vals.min(), y_vals.max(), 61)
 # bins = np.linspace(0.0, 0.6, 61)  # 30 bins between 0 and 0.6
