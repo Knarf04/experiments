@@ -241,8 +241,8 @@ plt.figure()
 
 var_vals_forget = np.array([forget_var_dict[seq_len][k] for k in keys])
 
-cutoff = np.quantile(var_vals_forget, 0.8)
-mask_fv = var_vals_forget >= cutoff   # Top 20%
+cutoff = np.quantile(var_vals_forget, 0.2)
+mask_fv = var_vals_forget < cutoff   # Top 20%
 
 bins = np.linspace(var_vals_forget.min(), var_vals_forget.max(), 61)
 plt.hist(
