@@ -172,10 +172,10 @@ for sl in dt_sum_head.keys():
 keys = forget_mean_dict[seq_len].keys()
 
 # log-ERF vs average forget gate
-x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])          # log-ERF
+x_vals = np.array([np.log(erf[seq_len][k]+1e-12) for k in keys])          # log-ERF
 y_vals = np.array([forget_mean_dict[seq_len][k] for k in keys])     # per-head mean forget
 
-cutoff = np.log(np.quantile(all_erf, 0.8))
+cutoff = np.log(np.quantile(all_erf, 0.8)+1e-12)
 mask = x_vals >= cutoff   # Top 20%
 
 plt.figure()
@@ -260,10 +260,10 @@ plt.savefig(f"/gpfs/hshen/plots/{model_type}_forget_var_hist.png", dpi=600)
 plt.show()
 
 # log-ERF vs Δt (mean per head)
-x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])
+x_vals = np.array([np.log(erf[seq_len][k]+1e-12) for k in keys])
 y_vals = np.array([dt_mean_dict[seq_len][k] for k in keys])   # per-head mean Δt
 
-cutoff = np.log(np.quantile(all_erf, 0.8))
+cutoff = np.log(np.quantile(all_erf, 0.8)+1e-12)
 mask = x_vals >= cutoff   # Top 20%
 
 plt.figure()
@@ -355,7 +355,7 @@ plt.figure()
 keys = forget_mean_dict[seq_len].keys()
 
 # log-ERF vs average forget gate
-x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])          # log-ERF
+x_vals = np.array([np.log(erf[seq_len][k]+1e-12) for k in keys])          # log-ERF
 y_vals = np.array([forget_mean_dict[seq_len][k] for k in keys])     # per-head mean forget
 
 xy = np.exp(x_vals * y_vals)
@@ -366,7 +366,7 @@ xy_max = np.max(xy)
 xy = (xy - xy_min) / (xy_max - xy_min)
 xy = lo + xy * (hi - lo) 
 
-cutoff = np.log(np.quantile(all_erf, 0.8))
+cutoff = np.log(np.quantile(all_erf, 0.8)+1e-12)
 mask = x_vals >= cutoff   # Top 20%
 
 bins = np.linspace(xy.min(), xy.max(), 61)
