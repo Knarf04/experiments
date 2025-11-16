@@ -327,7 +327,7 @@ plt.figure()
 var_vals_dt = np.array([dt_var_dict[seq_len][k] for k in keys])
 
 # bins = np.linspace(var_vals_dt.min(), var_vals_dt.max(), 61)
-bins = np.linspace(0.0, 0.15, 61)
+bins = np.linspace(0.0, 0.05, 61)
 plt.hist(
     var_vals_dt[~mask],
     bins=bins,
@@ -347,3 +347,40 @@ plt.legend()
 
 plt.savefig(f"/gpfs/hshen/plots/{model_type}_dt_var_hist.png", dpi=600)
 plt.show()
+
+
+# ---------------- PLOTTING ----------------
+
+keys = forget_mean_dict[seq_len].keys()
+
+# log-ERF vs average forget gate
+x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])          # log-ERF
+y_vals = np.array([forget_mean_dict[seq_len][k] for k in keys])     # per-head mean forget
+
+xy = x_vals * y_vals
+xy = xy/np.max(xy) * 1.24
+
+cutoff = np.log(np.quantile(all_erf, 0.8))
+mask = x_vals >= cutoff   # Top 20%
+
+bins = np.linspace(xy.min(), xy.max(), 61)
+plt.hist(
+    xy[~mask],
+    bins=bins,
+    alpha=0.6,
+    label="Bottom 80%",
+)
+plt.hist(
+    xy[mask],
+    bins=bins,
+    alpha=0.6,
+    label="Top 20%",
+)
+
+plt.xlabel("Average state magnitude growth per step", fontsize=14, fontweight='bold')
+plt.ylabel("Count", fontsize=14, fontweight='bold')
+plt.legend()
+
+plt.savefig(f"/gpfs/hshen/plots/{model_type}_state_hist.png", dpi=600)
+plt.show()
+
