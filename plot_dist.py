@@ -2,8 +2,8 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 
-model_type = "bamba2"
-seq_len = 4096   # target sequence length for plotting
+model_type = "nemotronh"
+seq_len = 8192   # target sequence length for plotting
 
 def read_jsonl(filepath: str) -> list:
     """
@@ -360,7 +360,7 @@ y_vals = np.array([forget_mean_dict[seq_len][k] for k in keys])     # per-head m
 
 xy = np.exp(x_vals * y_vals)
 
-lo, hi = 1, 1.45
+lo, hi = 1, 1.39
 xy_min = np.min(xy)
 xy_max = np.max(xy)
 xy = (xy - xy_min) / (xy_max - xy_min)
