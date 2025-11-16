@@ -2,8 +2,8 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 
-model_type = "mamba2"
-seq_len = 2048   # target sequence length for plotting
+model_type = "bamba2"
+seq_len = 4096   # target sequence length for plotting
 
 def read_jsonl(filepath: str) -> list:
     """
@@ -300,7 +300,8 @@ plt.show()
 # Histogram of per-head mean Δt, binned between 0 and 0.6 for 30 bins
 plt.figure()
 
-bins = np.linspace(0.0, 0.6, 61)  # 30 bins between 0 and 0.6
+bins = np.linspace(y_vals.min(), y_vals.max(), 61)
+# bins = np.linspace(0.0, 0.6, 61)  # 30 bins between 0 and 0.6
 plt.hist(
     y_vals[~mask],
     bins=bins,
@@ -326,8 +327,8 @@ plt.figure()
 
 var_vals_dt = np.array([dt_var_dict[seq_len][k] for k in keys])
 
-# bins = np.linspace(var_vals_dt.min(), var_vals_dt.max(), 61)
-bins = np.linspace(0.0, 0.05, 61)
+bins = np.linspace(var_vals_dt.min(), var_vals_dt.max(), 61)
+# bins = np.linspace(0.0, 0.05, 61)
 plt.hist(
     var_vals_dt[~mask],
     bins=bins,
@@ -359,7 +360,7 @@ y_vals = np.array([forget_mean_dict[seq_len][k] for k in keys])     # per-head m
 
 xy = np.exp(x_vals * y_vals)
 
-lo, hi = 1, 1.34
+lo, hi = 1, 1.45
 xy_min = np.min(xy)
 xy_max = np.max(xy)
 xy = (xy - xy_min) / (xy_max - xy_min)
