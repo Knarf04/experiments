@@ -300,7 +300,7 @@ plt.show()
 # Histogram of per-head mean Δt, binned between 0 and 0.6 for 30 bins
 plt.figure()
 
-bins = np.linspace(y_vals.min(), y_vals.max(), 61)  # 30 bins between 0 and 0.6
+bins = np.linspace(0.0, 0.6, 61)  # 30 bins between 0 and 0.6
 plt.hist(
     y_vals[~mask],
     bins=bins,
@@ -326,7 +326,8 @@ plt.figure()
 
 var_vals_dt = np.array([dt_var_dict[seq_len][k] for k in keys])
 
-bins = np.linspace(var_vals_dt.min(), var_vals_dt.max(), 61)
+# bins = np.linspace(var_vals_dt.min(), var_vals_dt.max(), 61)
+bins = np.linspace(0.0, 0.15, 61)
 plt.hist(
     var_vals_dt[~mask],
     bins=bins,
