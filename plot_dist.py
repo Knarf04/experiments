@@ -2,8 +2,8 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 
-model_type = "mamba2"
-seq_len = 2048   # target sequence length for plotting
+model_type = "bamba2"
+seq_len = 4096   # target sequence length for plotting
 
 def read_jsonl(filepath: str) -> list:
     """
@@ -300,7 +300,7 @@ plt.show()
 # Histogram of per-head mean Δt, binned between 0 and 0.6 for 30 bins
 plt.figure()
 
-bins = np.linspace(0.0, 0.6, 31)  # 30 bins between 0 and 0.6
+bins = np.linspace(y_vals.min(), y_vals.max(), 61)  # 30 bins between 0 and 0.6
 plt.hist(
     y_vals[~mask],
     bins=bins,
