@@ -357,9 +357,9 @@ keys = forget_mean_dict[seq_len].keys()
 x_vals = np.array([np.log(erf[seq_len][k]) for k in keys])          # log-ERF
 y_vals = np.array([forget_mean_dict[seq_len][k] for k in keys])     # per-head mean forget
 
-xy = x_vals * y_vals
+xy = np.exp(x_vals * y_vals)
 
-lo, hi = 0.96, 1.54
+lo, hi = 1, 1.34
 xy_min = np.min(xy)
 xy_max = np.max(xy)
 xy = (xy - xy_min) / (xy_max - xy_min)
