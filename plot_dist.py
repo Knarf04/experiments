@@ -212,15 +212,18 @@ plt.show()
 # Histograms of per-head mean forget gate (bottom 80% vs top 20%)
 plt.figure()
 
+cutoff = np.quantile(y_vals, 0.8)
+mask_fm = y_vals >= cutoff   # Top 20%
+
 bins = np.linspace(y_vals.min(), y_vals.max(), 61)
 plt.hist(
-    y_vals[~mask],
+    y_vals[~mask_fm],
     bins=bins,
     alpha=0.6,
     label="Bottom 80%",
 )
 plt.hist(
-    y_vals[mask],
+    y_vals[mask_fm],
     bins=bins,
     alpha=0.6,
     label="Top 20%",
@@ -238,15 +241,18 @@ plt.figure()
 
 var_vals_forget = np.array([forget_var_dict[seq_len][k] for k in keys])
 
+cutoff = np.quantile(var_vals_forget, 0.8)
+mask_fv = var_vals_forget >= cutoff   # Top 20%
+
 bins = np.linspace(var_vals_forget.min(), var_vals_forget.max(), 61)
 plt.hist(
-    var_vals_forget[~mask],
+    var_vals_forget[~mask_fv],
     bins=bins,
     alpha=0.6,
     label="Bottom 80%",
 )
 plt.hist(
-    var_vals_forget[mask],
+    var_vals_forget[mask_fv],
     bins=bins,
     alpha=0.6,
     label="Top 20%",
@@ -300,16 +306,19 @@ plt.show()
 # Histogram of per-head mean Δt, binned between 0 and 0.6 for 30 bins
 plt.figure()
 
+cutoff = np.quantile(y_vals, 0.8)
+mask_dt = y_vals >= cutoff   # Top 20%
+
 bins = np.linspace(y_vals.min(), y_vals.max(), 61)
 # bins = np.linspace(0.0, 0.6, 61)  # 30 bins between 0 and 0.6
 plt.hist(
-    y_vals[~mask],
+    y_vals[~mask_dt],
     bins=bins,
     alpha=0.6,
     label="Bottom 80%",
 )
 plt.hist(
-    y_vals[mask],
+    y_vals[mask_dt],
     bins=bins,
     alpha=0.6,
     label="Top 20%",
