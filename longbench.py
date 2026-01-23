@@ -99,13 +99,13 @@ if __name__ == "__main__":
         "--dataset_dir", 
         type=str, 
         required=True, 
-        help="Path to the dataset directory (e.g., 'data/hotpotqa'). The script expects the basename to match the .jsonl filename."
+        help="Path to the dataset directory (e.g., 'data/hotpotqa')."
     )
     
     args = parser.parse_args()
     
     try:
-        # 1. Create Dataset using the input argument
+        # 1. Create Dataset
         dataset = LongBenchDataset(args.dataset_dir)
         
         # 2. Wrap in DataLoader
@@ -120,9 +120,15 @@ if __name__ == "__main__":
         print(f"Dataset size: {len(dataset)}")
         for i, batch in enumerate(dataloader):
             print(f"\n--- Batch {i} ---")
-            print("Inputs:", batch["input"])
-            print("Context lengths:", [len(c) for c in batch["context"]])
-            print("Answers:", batch["answers"])
+            
+            # Print ALL available keys to prove they exist
+            print("Available Fields:", list(batch.keys()))
+            
+            print(f"Dataset Name: {batch['dataset']}")  # Verify your directory logic
+            print(f"Inputs:       {batch['input']}")
+            print(f"Answers:      {batch['answers']}")
+            print(f"All Classes:  {batch['all_classes']}") # Will be None for QA, list for classification
+            print(f"IDs:          {batch['_id']}")
             
             # Stop after 1 batch for demonstration
             break
