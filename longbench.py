@@ -129,7 +129,9 @@ if __name__ == "__main__":
             print(f"Answers:      {batch['answers']}")
             print(f"All Classes:  {batch['all_classes']}") # Will be None for QA, list for classification
             print(f"IDs:          {batch['_id']}")
-            
+            print(f"Context:      {batch['context']}")
+            print(f"Length:       {batch['length']}")
+
             # Stop after 1 batch for demonstration
             break
             
