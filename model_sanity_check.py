@@ -3,9 +3,9 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
 model_path = "/gpfs/goon/models/granite-4-lite/run-20250607-phase3-annealing-with-fim-revised-mix/hf"
-model = AutoModelForCausalLM(model_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
+model = AutoModelForCausalLM.from_pretrained(model_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
 
-tokenizer = AutoTokenizer(model_path)
+tokenizer = AutoTokenizer.from_pretrained(model_path)
 model.eval()
 
 prompt = "The capital city of USA is"
