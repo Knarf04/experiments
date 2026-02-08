@@ -40,8 +40,16 @@ if __name__ == "__main__":
     if not args.set:
         args.set = {}
 
-    updates_to_make = {}
+    update_dict = {}
     for key, value in args.set:
+        # v5.0.0dev specific rope format
+        if "rope" in key:
+            if "rope_parameters" not in update_dict:
+                update_dict["rope_parameters"] = {}
+            update_dict_entry = update_dict["rope_parameters"]
+        else:
+            update_dict_entry = update_dict
+
         try:
             processed_value = int(value)
         except ValueError:
@@ -54,6 +62,7 @@ if __name__ == "__main__":
                     processed_value = False
                 else:
                     processed_value = value
-        updates_to_make[key] = processed_value
+                    
+        update_dict_entry[key] = processed_value
 
-    update_experiments_config(args.config_path, updates_to_make, reset=args.reset)
+    update_experiments_config(args.config_path, update_dict, reset=args.reset)
