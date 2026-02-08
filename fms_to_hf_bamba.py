@@ -257,10 +257,16 @@ def fms_to_hf(model_variant, load_path, save_path, tokenizer_name_or_path, upi_p
     model = MambaLMHeadModel(mamba_config)
 
     print(f"Reading state dict from {load_path}")
-    state_dict = {"model_state": model.state_dict()}
-    load_state_dict(
-        state_dict=state_dict, storage_reader=FileSystemReader(load_path), no_dist=True
-    )
+    
+    if os.path.isfile(load_path):
+        checkpoint_data = torch.load(load_path, map_location="cpu")
+        state_dict["model_state"] = checkpoint_data.get("model_state")
+    else: 
+        state_dict = {"model_state": model.state_dict()}
+
+        load_state_dict(
+            state_dict=state_dict, storage_reader=FileSystemReader(load_path), no_dist=True
+        )
 
     # Overwrite UPI mask within the model 
     if upi_path: 
