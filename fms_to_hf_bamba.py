@@ -130,8 +130,9 @@ def convert_ssm_config_to_hf_config(
         hf_config.num_key_value_heads = attn_cfg["num_heads_kv"]
         # hf_config.rope_theta = attn_cfg.get("rotary_emb_base", 10000)
         # For transformers v5.0.0dev, need to change the format
+        # https://huggingface.co/docs/transformers/v5.0.0/en/internal/rope_utils
         hf_config.rope_parameters = {
-            "rope_theta": attn_cfg.get("rotary_emb_base", 10000),
+            "rope_theta": float(attn_cfg.get("rotary_emb_base", 10000.0)),
             "rope_type": "default"
         }
 
