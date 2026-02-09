@@ -1,10 +1,10 @@
 import torch
 
-ckpt1 = torch.load(f"/gpfs/hshen/bamba_freeze/bamba-32k-rerun-ckpt-2/pth/step_500/consolidated.00.pth", map_location='cpu')['model_state']
+ckpt1 = torch.load("/gpfs/davis/granites/bamba-merged/consolidated_ckpt.pth", map_location='cpu')['model_state']
 diff_dict = {}
 metrics_dict = {}  # metrics_dict[metric][key] = [val_per_step_pair]
 METRICS = ["mean", "std", "mean_abs", "max", "min", "l2", "rms"]
-for step in range(1000, 6500, 500):
+for step in range(500, 6500, 500):
     diff_dict[f"{step-500}-{step}"] = {}
     print(f"============= Step {step-500} vs. {step} =============")
     ckpt2 = torch.load(f"/gpfs/hshen/bamba_freeze/bamba-32k-rerun-ckpt-2/pth/step_{step}/consolidated.00.pth", map_location='cpu')['model_state']
