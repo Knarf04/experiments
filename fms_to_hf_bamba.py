@@ -188,11 +188,6 @@ def save_sharded_safetensors(
 
 # Adapted from transformers.models.mamba.convert_mamba_ssm_checkpoint_to_pytorch.py
 def fms_to_hf(model_variant, load_path, save_path, tokenizer_name_or_path, precision="fp32", save_model=True):
-    print("Initializing model...")
-    config_data = get_model_config(model_variant)
-    config = MambaConfig(**config_data)
-    print(config)
-
     print("Copying tokenizer...")
     # load tokenizer if provided, this will be used to set the
     # token_ids in the config file
@@ -208,10 +203,13 @@ def fms_to_hf(model_variant, load_path, save_path, tokenizer_name_or_path, preci
             token_ids[key] = id
     tokenizer.save_pretrained(save_path)
 
-
     # there are some configs unsettable by mamba_ssn config, so
     # if there are changes from the defaults, have to pass them into
     # the function
+    print("Constructing config...")
+    config_data = get_model_config(model_variant)
+    config = MambaConfig(**config_data)
+
     unsettables = {
         "mamba_d_head": 64,
         "mamba_d_state": 128,
@@ -227,11 +225,11 @@ def fms_to_hf(model_variant, load_path, save_path, tokenizer_name_or_path, preci
     )
     hf_config.save_pretrained(save_path)
 
+    print("Loading state dict...")
     # Load state dict of the original model and transfer to hf model
     state_dict = torch.load(load_path, map_location="cpu").get("model_state")
     # FIXME: allow other parameters to pass in
     state_dict = convert_state_dict_from_mamba_ssm(state_dict)
-    print(state_dict)
 
     # Save new model to pytorch_dump_path
     dtype = torch.float32 if precision == "fp32" else (torch.bfloat16 if precision == "bf16" else torch.float16)
@@ -260,10 +258,3 @@ if __name__ == "__main__":
 
     # --src-dir=/gpfs/hshen/bamba_upi_tune/bamba_upi_32k_layer/pth/step_6000/consolidated.00.pth
     fms_to_hf(args.model_variant, args.src_dir, DEST_DIR, TOKENIZER_DIR)
-
-    # convert_mamba_ssm_checkpoint_file_to_huggingface_model_file(
-    #     DEST_DIR , 'fp32', DEST_DIR + '/hf', save_model='sharded'
-    # )
-
-    # for file in glob.glob(DEST_DIR + '/*token*'):
-    #     shutil.copy2(file, DEST_DIR + '/hf/')
