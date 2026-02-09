@@ -306,6 +306,10 @@ def fms_to_hf(model_variant, load_path, save_path, tokenizer_name_or_path, upi_p
 
     print(f"Model saving at {save_path}")
 
+# def sanity_check(model, ckpt):
+#     for in ckpt:
+
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
