@@ -190,26 +190,26 @@ def save_sharded_safetensors(
 
 
 # Adapted from transformers.models.mamba.convert_mamba_ssm_checkpoint_to_pytorch.py
-def convert_mamba_ssm_checkpoint_file_to_huggingface_model_file(
-    mamba_ssm_checkpoint_path: str,
-    precision: str,
-    output_dir: str,
-    tokenizer_path: Optional[str] = None,
-    save_model: Union[bool, str] = True,
-) -> None:
+def fms_to_hf(model_variant, load_path, save_path, tokenizer_name_or_path, precision="fp32", save_model=True):
+    print("Initializing model...")
+    config_data = get_model_config(model_variant)
+    config = MambaConfig(**config_data)
+
+    print("Copying tokenizer...")
     # load tokenizer if provided, this will be used to set the
     # token_ids in the config file
     token_ids = {}
-    if tokenizer_path:
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-        for key in [
-            "bos_token_id",
-            "eos_token_id",
-            "pad_token_id",
-        ]:
-            id = getattr(tokenizer, key, None)
-            if id:
-                token_ids[key] = id
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+    for key in [
+        "bos_token_id",
+        "eos_token_id",
+        "pad_token_id",
+    ]:
+        id = getattr(tokenizer, key, None)
+        if id:
+            token_ids[key] = id
+    tokenizer.save_pretrained(save_path)
+
 
     # there are some configs unsettable by mamba_ssn config, so
     # if there are changes from the defaults, have to pass them into
@@ -221,25 +221,16 @@ def convert_mamba_ssm_checkpoint_file_to_huggingface_model_file(
         "rms_norm_eps": 1e-5,
     }
 
-    # Load and save config based on name
-    config_path = path.join(mamba_ssm_checkpoint_path, "config.json")
-    with open(config_path, "r", encoding="utf-8") as json_file:
-        config = json.load(json_file)
-
     # convert the config
     hf_config = convert_ssm_config_to_hf_config(
         config_ssm=config,
         **token_ids,
         **unsettables,
     )
-    hf_config.save_pretrained(output_dir)
+    hf_config.save_pretrained(save_path)
 
     # Load state dict of the original model and transfer to hf model
-    state_dict = torch.load(
-        path.join(mamba_ssm_checkpoint_path, "pytorch_model.bin"),
-        map_location="cpu",
-        weights_only=True,
-    )
+    state_dict = torch.load(load_path, map_location="cpu").get("model_state")
     # FIXME: allow other parameters to pass in
     state_dict = convert_state_dict_from_mamba_ssm(state_dict)
     print(state_dict)
@@ -254,58 +245,7 @@ def convert_mamba_ssm_checkpoint_file_to_huggingface_model_file(
         save_file_fn = save_sharded_safetensors
 
     if save_file_fn:
-        save_file_fn({k: v.to(dtype) for k, v in state_dict.items()}, output_dir, metadata={"format": "pt"})
-
-
-def fms_to_hf(model_variant, load_path, save_path, tokenizer_name_or_path, upi_path=None):
-    print("Initializing model...")
-    config_data = get_model_config(model_variant)
-    mamba_config = MambaConfig(**config_data)
-    model = MambaLMHeadModel(mamba_config)
-
-    print(f"Reading state dict from {load_path}")
-    state_dict = {"model_state": model.state_dict()}
-
-    if os.path.isfile(load_path):
-        checkpoint_data = torch.load(load_path, map_location="cpu")
-        state_dict["model_state"] = checkpoint_data.get("model_state")
-    else: 
-        load_state_dict(
-            state_dict=state_dict, storage_reader=FileSystemReader(load_path), no_dist=True
-        )
-
-    # Overwrite UPI mask within the model 
-    if upi_path: 
-        if "upi" not in model_variant:
-            model_variant_upi = model_variant+"_upi"
-        else:
-            model_variant_upi = model_variant
-        config_data = get_model_config(model_variant_upi)
-        mamba_config = MambaConfig(**config_data)
-        model = MambaLMHeadModel(mamba_config)
-
-        print("Overwritting UPI masks...")
-        upi_mask_dict = torch.load(upi_path)
-        for i in range(config_data['n_layer']): # Iterate through all layers
-            if i not in config_data['attn_layer_idx']: # Exclude transformer layers
-                if "upi" not in model_variant:
-                    state_dict['model_state'][f'backbone.layers.{i}.mixer.upi_mask'] = upi_mask_dict[i].to(torch.bfloat16)
-                else:
-                    state_dict['model_state'][f'backbone.layers.{i}.mixer.upi_mask'] *= upi_mask_dict[i].to(torch.bfloat16)
-
-    print("Loading state dict into the model...")
-    model.load_state_dict(state_dict["model_state"])
-
-    print("Saving model to HF-compatible format...")
-    model.save_pretrained(save_path)
-
-    print("Copying tokenizer...")
-    from transformers import AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
-    tokenizer.save_pretrained(save_path)
-
-    print(f"Model saving at {save_path}")
+        save_file_fn({k: v.to(dtype) for k, v in state_dict.items()}, save_path, metadata={"format": "pt"})
 
 
 if __name__ == "__main__":
@@ -314,7 +254,6 @@ if __name__ == "__main__":
     parser.add_argument('--model-name', type=str, required=True, help="Model name, (example: zloss-500k-step-128k)")
     parser.add_argument('--model-dir', type=str, required=True, help="Saving directory")
     parser.add_argument('--model-variant', type=str, required=True, help="Mamba model type, (example: mamba_9.8b)")
-    parser.add_argument('--upi-path', type=str, default=None, help="Path to an UPI scaling mask, if applicable")
 
     args = parser.parse_args()
 
@@ -322,11 +261,11 @@ if __name__ == "__main__":
     TOKENIZER_DIR = '/datasets/tokenizers/llama3'
 
     # --src-dir=/gpfs/hshen/bamba_upi_tune/bamba_upi_32k_layer/pth/step_6000/consolidated.00.pth
-    fms_to_hf(args.model_variant, args.src_dir, DEST_DIR, TOKENIZER_DIR, upi_path=args.upi_path)
+    fms_to_hf(args.model_variant, args.src_dir, DEST_DIR, TOKENIZER_DIR)
 
-    convert_mamba_ssm_checkpoint_file_to_huggingface_model_file(
-        DEST_DIR , 'fp32', DEST_DIR + '/hf', save_model='sharded'
-    )
+    # convert_mamba_ssm_checkpoint_file_to_huggingface_model_file(
+    #     DEST_DIR , 'fp32', DEST_DIR + '/hf', save_model='sharded'
+    # )
 
-    for file in glob.glob(DEST_DIR + '/*token*'):
-        shutil.copy2(file, DEST_DIR + '/hf/')
+    # for file in glob.glob(DEST_DIR + '/*token*'):
+    #     shutil.copy2(file, DEST_DIR + '/hf/')
