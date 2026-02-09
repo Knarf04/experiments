@@ -105,14 +105,13 @@ def convert_ssm_config_to_hf_config(
     hf_config.architectures = ["BambaForCausalLM"]
 
     # Set important values from config and recalculate other resulting entries
-    hf_config.hidden_size = config_ssm.d_model # config_ssm["d_model"]
-    hf_config.intermediate_size = config_ssm.d_intermediate # config_ssm["d_intermediate"]
+    hf_config.hidden_size = config_ssm.d_model 
+    hf_config.intermediate_size = config_ssm.d_intermediate 
     hf_config.mamba_n_heads = (hf_config.hidden_size * hf_config.mamba_expand) // hf_config.mamba_d_head
-    hf_config.num_hidden_layers = config_ssm.n_layer # config_ssm["n_layer"]
-    hf_config.tie_word_embeddings = config_ssm.tie_embeddings # config_ssm["tie_embeddings"]
+    hf_config.num_hidden_layers = config_ssm.n_layer 
+    hf_config.tie_word_embeddings = config_ssm.tie_embeddings 
 
     # currently this script assumes config_ssm belongs to v2
-    # if config_ssm["ssm_cfg"].get("layer") != "Mamba2":
     if config_ssm.ssm_cfg.get("layer") != "Mamba2":
         raise ValueError("Conversion script only supports Mamba2")
 
