@@ -23,13 +23,10 @@ import argparse
 import json
 import re
 import os
-from os import path
-import glob
-import shutil
-from typing import Dict, Optional, Union
+
+from typing import Dict, Union
 
 import torch
-from torch.distributed._shard.checkpoint import FileSystemReader, load_state_dict
 
 from huggingface_hub import split_torch_state_dict_into_shards
 
@@ -41,7 +38,6 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
 from transformers.models.bamba import BambaConfig
 
 from mamba_ssm.models.config_mamba import MambaConfig
-from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
 
 from fms_fsdp.utils.config_utils import get_model_config
 
@@ -194,6 +190,7 @@ def fms_to_hf(model_variant, load_path, save_path, tokenizer_name_or_path, preci
     print("Initializing model...")
     config_data = get_model_config(model_variant)
     config = MambaConfig(**config_data)
+    print(config)
 
     print("Copying tokenizer...")
     # load tokenizer if provided, this will be used to set the
