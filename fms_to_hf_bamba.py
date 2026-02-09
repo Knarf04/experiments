@@ -328,9 +328,9 @@ if __name__ == "__main__":
 
     # --src-dir=/gpfs/hshen/bamba_upi_tune/bamba_upi_32k_layer/pth/step_6000/consolidated.00.pth
     fms_to_hf(args.model_variant, args.src_dir, DEST_DIR, TOKENIZER_DIR)
-
+    print("Checkpoint saved to {DEST_DIR}!")
     # Verify conversion
-    print("\nVerifying conversion...")
+    print("Verifying conversion...")
     fms_sd = torch.load(args.src_dir, map_location="cpu").get("model_state")
     hf_sd = load_file(os.path.join(DEST_DIR, SAFE_WEIGHTS_NAME))
     verify_conversion(fms_sd, hf_sd)

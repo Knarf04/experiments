@@ -17,7 +17,8 @@ for step in range(1000, 6500, 500):
         mean_abs = diff.abs().mean().item()
         max_val = diff.max().item()
         min_val = diff.min().item()
-        print(f"  {key}: MeanΔ={mean:.4g}  StdΔ={std:.4g}  Mean|Δ|={mean_abs:.4g}  MaxΔ={max_val:.4g}  MinΔ={min_val:.4g}")
+        l2 = diff.float().norm(2).item()
+        print(f"  {key}: MeanΔ={mean:.4g}  StdΔ={std:.4g}  Mean|Δ|={mean_abs:.4g}  MaxΔ={max_val:.4g}  MinΔ={min_val:.4g}  L2={l2:.4g}")
 
     # Global summary for this step pair
     all_deltas = torch.cat([diff_dict[f"{step-500}-{step}"][k].flatten() for k in ckpt1])
@@ -25,4 +26,13 @@ for step in range(1000, 6500, 500):
 
     ckpt1 = ckpt2
 
-
+# Compare neighboring diffs: cosine similarity between diff vectors at each parameter
+step_pairs = list(diff_dict.keys())
+for i in range(len(step_pairs) - 1):
+    sp1, sp2 = step_pairs[i], step_pairs[i + 1]
+    print(f"\n============= Cosine Similarity: {sp1} vs. {sp2} =============")
+    for key in diff_dict[sp1]:
+        d1 = diff_dict[sp1][key].flatten().float()
+        d2 = diff_dict[sp2][key].flatten().float()
+        cos_sim = torch.nn.functional.cosine_similarity(d1.unsqueeze(0), d2.unsqueeze(0)).item()
+        print(f"  {key}: cos_sim={cos_sim:.6f}")
