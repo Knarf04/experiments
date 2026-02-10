@@ -24,10 +24,9 @@ for fname in matched:
     path = os.path.join(directory, fname)
     with open(path) as f:
         data = json.load(f)
-    print(f"--- {fname} (step={step}) ---")
-    results = data["results"]
     
     print(f"--- step={step} ---")
+    results = data["results"]
     val_list = []
     for subtask in subtasks:
         val = next(v for k, v in results[f"longbench_{subtask}"].items() if k.endswith("score,none"))
