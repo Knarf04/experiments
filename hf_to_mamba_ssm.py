@@ -443,9 +443,12 @@ def convert_granite_weights(hf_state_dict, hf_config):
         ].clone()
 
         # shared_mlp.input_linear → mlp.fc1  (gated, 2x intermediate)
-        new_sd[f"{mamba_prefix}.mlp.fc1.weight"] = hf_state_dict[
-            f"{hf_prefix}.shared_mlp.input_linear.weight"
-        ].clone()
+        # GraniteMoeHybrid: activation(chunk[0]) * chunk[1] — first half is gate
+        # GatedMLP:         chunk[0] * activation(chunk[1]) — second half is gate
+        # So we must swap the two halves.
+        input_linear_w = hf_state_dict[f"{hf_prefix}.shared_mlp.input_linear.weight"]
+        gate_w, value_w = input_linear_w.chunk(2, dim=0)
+        new_sd[f"{mamba_prefix}.mlp.fc1.weight"] = torch.cat([value_w, gate_w], dim=0)
 
         # shared_mlp.output_linear → mlp.fc2, scaled by residual_multiplier
         new_sd[f"{mamba_prefix}.mlp.fc2.weight"] = (
