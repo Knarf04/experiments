@@ -11,6 +11,8 @@ Supported model types:
 """
 
 import argparse
+import json
+import os
 
 import torch
 import torch.nn.functional as F
@@ -462,6 +464,7 @@ def convert_nemotronh(model_dir, output_dir=None, check=False, device="cpu", dty
           f"{sum(1 for b in blocks if b['type'] == 'mamba')} mamba, "
           f"{sum(1 for b in blocks if b['type'] == 'attention')} attention, "
           f"{sum(1 for b in blocks if b['mlp_idx'] is not None)} with MLP")
+    _print_config_for_fsdp(mamba_config)
 
     print(f"Loading HF model from {model_dir}...")
     hf_model = AutoModelForCausalLM.from_pretrained(
@@ -507,6 +510,7 @@ def convert_granitemoehybrid(model_dir, output_dir=None, check=False, device="cp
 
     print("Building MambaConfig...")
     mamba_config = granite_config_to_mamba(hf_config)
+    _print_config_for_fsdp(mamba_config)
 
     print(f"Loading HF model from {model_dir}...")
     hf_model = AutoModelForCausalLM.from_pretrained(
@@ -554,10 +558,53 @@ def _report_load_result(result, mamba_config):
         print("  All weights loaded successfully.")
 
 
+def _print_config_for_fsdp(mamba_config):
+    """Print MambaConfig as a copy-pasteable dict for fms-fsdp config_utils.py."""
+    import pprint
+
+    d = {}
+    for k, v in mamba_config.__dict__.items():
+        if isinstance(v, dict):
+            # Clean up inf values in nested dicts (e.g. dt_limit in ssm_cfg)
+            cleaned = {}
+            for dk, dv in v.items():
+                if isinstance(dv, tuple):
+                    dv = list(dv)
+                if isinstance(dv, list):
+                    dv = [float("inf") if x == float("inf") else x for x in dv]
+                cleaned[dk] = dv
+            v = cleaned
+        d[k] = v
+
+    print("\n# ─── Copy-paste into config_utils.py ───")
+    print(f'    elif model_variant == "YOUR_VARIANT_NAME":')
+    print(f"        model_config = ", end="")
+    pprint.pprint(d, width=100)
+    print("# ─── End ───\n")
+
+
 def _save_model(mamba_model, model_dir, output_dir):
-    """Save converted model and tokenizer."""
-    print(f"\nSaving to {output_dir}...")
-    mamba_model.save_pretrained(output_dir)
+    """Save converted model in fms-fsdp compatible format.
+
+    Produces:
+        output_dir/consolidated.00.pth  — {"model_state": state_dict}
+        output_dir/config.json          — MambaConfig as JSON
+        output_dir/tokenizer files      — copied from source model
+    """
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Save model state in fms-fsdp format
+    save_path = os.path.join(output_dir, "consolidated.00.pth")
+    print(f"\nSaving model state to {save_path}...")
+    torch.save({"model_state": mamba_model.state_dict()}, save_path)
+
+    # Save config
+    config_path = os.path.join(output_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump(mamba_model.config.__dict__, f, indent=4)
+
+    # Save tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
     tokenizer.save_pretrained(output_dir)
     print("Done!")
