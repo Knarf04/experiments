@@ -287,15 +287,6 @@ def granite_config_to_mamba(hf_config):
     else:
         headdim = hf_config.mamba_d_head
 
-    # Get rope_theta from config
-    rope_theta = getattr(hf_config, "rope_theta", None)
-    if rope_theta is None:
-        rope_params = getattr(hf_config, "rope_parameters", None)
-        if rope_params and isinstance(rope_params, dict):
-            rope_theta = rope_params.get("rope_theta", 10000.0)
-        else:
-            rope_theta = 10000.0
-
     head_dim = hf_config.hidden_size // hf_config.num_attention_heads
 
     # Always untie embeddings so we can fold different scalings
@@ -326,8 +317,7 @@ def granite_config_to_mamba(hf_config):
             qkv_proj_bias=hf_config.attention_bias,
             causal=True,
             softmax_scale=hf_config.attention_multiplier,
-            rotary_emb_dim=head_dim,
-            rotary_emb_base=rope_theta,
+            rotary_emb_dim=0,  # GraniteMoeHybrid does not use RoPE
         ),
         rms_norm=True,
         norm_epsilon=getattr(hf_config, "rms_norm_eps", 1e-6),
