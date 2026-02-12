@@ -595,7 +595,7 @@ def _save_model(mamba_model, model_dir, output_dir):
     os.makedirs(output_dir, exist_ok=True)
 
     # Save model state in fms-fsdp format
-    save_path = os.path.join(output_dir, "consolidated.00.pth")
+    save_path = os.path.join(output_dir, "consolidated_ckpt.pth")
     print(f"\nSaving model state to {save_path}...")
     torch.save({"model_state": mamba_model.state_dict()}, save_path)
 
