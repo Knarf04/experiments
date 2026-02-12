@@ -136,7 +136,7 @@ def nemotronh_config_to_mamba(hf_config):
             layer="Mamba2",
             d_state=hf_config.ssm_state_size,
             d_conv=hf_config.conv_kernel,
-            expand=hf_config.mamba_expand,
+            expand=hf_config.expand,
             headdim=hf_config.mamba_head_dim,
             ngroups=hf_config.n_groups,
             rmsnorm=True,
