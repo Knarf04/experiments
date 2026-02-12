@@ -472,7 +472,7 @@ def convert_nemotronh(model_dir, output_dir=None, check=False, device="cpu", dty
 
     print(f"Loading HF model from {model_dir}...")
     hf_model = AutoModelForCausalLM.from_pretrained(
-        model_dir, torch_dtype=dtype, device_map=device, trust_remote_code=True
+        model_dir, torch_dtype=dtype, trust_remote_code=True
     )
     hf_sd = hf_model.state_dict()
 
@@ -517,7 +517,7 @@ def convert_granitemoehybrid(model_dir, output_dir=None, check=False, device="cp
 
     print(f"Loading HF model from {model_dir}...")
     hf_model = AutoModelForCausalLM.from_pretrained(
-        model_dir, torch_dtype=dtype, device_map=device, trust_remote_code=True
+        model_dir, torch_dtype=dtype, trust_remote_code=True
     )
     hf_sd = hf_model.state_dict()
 
