@@ -198,9 +198,10 @@ def convert_ssm_config_to_hf_config(
         # hf_config.rope_theta = attn_cfg.get("rotary_emb_base", 10000)
         # For transformers v5.0.0dev, need to change the format
         # https://huggingface.co/docs/transformers/v5.0.0/en/internal/rope_utils
+        rope_type = "none" if attn_cfg["rotary_emb_dim"] == 0 else "default"
         hf_config.rope_parameters = {
             "rope_theta": float(attn_cfg.get("rotary_emb_base", 10000.0)),
-            "rope_type": "default"
+            "rope_type": rope_type,
         }
 
     attention_layer_indices = config_ssm.attn_layer_idx
