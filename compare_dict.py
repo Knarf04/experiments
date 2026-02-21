@@ -1,13 +1,32 @@
+import argparse
 import torch
 
-ckpt1 = torch.load("/gpfs/davis/granites/bamba-merged/consolidated_ckpt.pth", map_location='cpu')['model_state']
+parser = argparse.ArgumentParser()
+parser.add_argument('--model-type', type=str, required=True, choices=['bamba', 'nemoh', 'g4l'])
+parser.add_argument('--disp-name', type=str, required=True)
+args = parser.parse_args()
+
+model_type = args.model_type
+disp_name = args.disp_name
+
+# Base checkpoint
+if model_type == "bamba":
+    # Bamba
+    ckpt1 = torch.load("/gpfs/hshen/fms-ckpt/bamba_v2_9b/consolidated.00.pth", map_location='cpu')['model_state']
+elif model_type == "nemoh":
+    # Nemotron-H
+    ckpt1 = torch.load("/gpfs/hshen/fms-ckpt/nemotron_h_8b/consolidated.00.pth", map_location='cpu')['model_state']
+else:
+    # Granite 4 lite
+    ckpt1 = torch.load("/gpfs/hshen/fms-ckpt/granite_4_lite/consolidated.00.pth", map_location='cpu')['model_state']
+
 diff_dict = {}
 metrics_dict = {}  # metrics_dict[metric][key] = [val_per_step_pair]
 METRICS = ["mean", "std", "mean_abs", "max", "min", "l2", "rms"]
 for step in range(500, 6500, 500):
     diff_dict[f"{step-500}-{step}"] = {}
     print(f"============= Step {step-500} vs. {step} =============")
-    ckpt2 = torch.load(f"/gpfs/hshen/bamba_freeze/bamba-32k-rerun-ckpt-2/pth/step_{step}/consolidated.00.pth", map_location='cpu')['model_state']
+    ckpt2 = torch.load(f"/gpfs/hshen/sft_freeze/{disp_name}/pth/step_{step}/consolidated.00.pth", map_location='cpu')['model_state']
     for key in ckpt1:
         diff = ckpt1[key] - ckpt2[key]
         diff_dict[f"{step-500}-{step}"][key] = diff
@@ -49,7 +68,7 @@ for i in range(len(step_pairs) - 1):
         step_dict[key] += [cos_sim]
 
 import csv
-csv_base = "/gpfs/hshen/bamba_freeze/bamba-32k-rerun-ckpt-2"
+csv_base = f"/gpfs/hshen/csv/{disp_name}"
 
 # Write per-metric CSVs
 all_step_labels = [f"{s-500}-{s}" for s in range(1000, 6500, 500)]
