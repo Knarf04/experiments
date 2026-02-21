@@ -68,7 +68,9 @@ for i in range(len(step_pairs) - 1):
         step_dict[key] += [cos_sim]
 
 import csv
+import os
 csv_base = f"/gpfs/hshen/csv/{disp_name}"
+os.makedirs(csv_base, exist_ok=True)
 
 # Write per-metric CSVs
 all_step_labels = [f"{s-500}-{s}" for s in range(1000, 6500, 500)]
