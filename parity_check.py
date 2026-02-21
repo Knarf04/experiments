@@ -21,7 +21,7 @@ DEFAULT_PROMPTS = [
 def load_model(path, device):
     print(f"  Loading model from {path} ...")
     model = AutoModelForCausalLM.from_pretrained(
-        path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True
+        path, torch_dtype=torch.float32, low_cpu_mem_usage=True
     )
     model.eval()
     model.to(device)
