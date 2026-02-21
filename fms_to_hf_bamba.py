@@ -258,12 +258,12 @@ def save_sharded_safetensors(
 
 
 # Adapted from transformers.models.mamba.convert_mamba_ssm_checkpoint_to_pytorch.py
-def fms_to_hf(model_variant, load_path, save_path, tokenizer_name_or_path, precision="fp32", save_model=True):
+def fms_to_hf(model_variant, load_path, save_path, tokenizer_path, precision="fp32", save_model=True):
     print("Copying tokenizer...")
     # load tokenizer if provided, this will be used to set the
     # token_ids in the config file
     token_ids = {}
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     for key in [
         "bos_token_id",
         "eos_token_id",
@@ -316,22 +316,32 @@ def fms_to_hf(model_variant, load_path, save_path, tokenizer_name_or_path, preci
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--src-dir', type=str, required=True, help="Model source directory, (example: /gpfs/davis/bamba_tune/zloss-500k-step-128k/checkpoints/step_6000_ckp)")
-    parser.add_argument('--model-name', type=str, required=True, help="Model name, (example: zloss-500k-step-128k)")
-    parser.add_argument('--model-dir', type=str, required=True, help="Saving directory")
-    parser.add_argument('--model-variant', type=str, required=True, help="Mamba model type, (example: mamba_9.8b)")
+    parser = argparse.ArgumentParser(
+        description="Convert mamba_ssm checkpoint to Bamba HuggingFace format"
+    )
+    parser.add_argument('--src-dir', type=str, required=True,
+                        help="Path to consolidated.00.pth")
+    parser.add_argument('--model-variant', type=str, required=True,
+                        help="Mamba model variant (e.g. mamba_9.8b)")
+    parser.add_argument('--model-dir', type=str, required=True,
+                        help="Saving directory")
+    parser.add_argument('--model-name', type=str, default='',
+                        help="Model name (appended to model-dir)")
+    parser.add_argument('--tokenizer', type=str, required=True,
+                        help="Tokenizer name or path")
+    parser.add_argument('--precision', type=str, default='fp32',
+                        choices=['fp32', 'bf16', 'fp16'])
 
     args = parser.parse_args()
 
-    DEST_DIR = args.model_dir + '/' + args.model_name
-    TOKENIZER_DIR = '/datasets/tokenizers/llama3'
+    save_path = os.path.join(args.model_dir, args.model_name) if args.model_name else args.model_dir
+    os.makedirs(save_path, exist_ok=True)
 
-    # --src-dir=/gpfs/hshen/bamba_upi_tune/bamba_upi_32k_layer/pth/step_6000/consolidated.00.pth
-    fms_to_hf(args.model_variant, args.src_dir, DEST_DIR, TOKENIZER_DIR)
-    print("Checkpoint saved to {DEST_DIR}!")
+    fms_to_hf(args.model_variant, args.src_dir, save_path, args.tokenizer,
+              precision=args.precision)
+    print(f"Checkpoint saved to {save_path}!")
     # Verify conversion
     print("Verifying conversion...")
     fms_sd = torch.load(args.src_dir, map_location="cpu").get("model_state")
-    hf_sd = load_file(os.path.join(DEST_DIR, SAFE_WEIGHTS_NAME))
+    hf_sd = load_file(os.path.join(save_path, SAFE_WEIGHTS_NAME))
     verify_conversion(fms_sd, hf_sd)
