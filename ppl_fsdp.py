@@ -210,7 +210,7 @@ def sliding_window_ppl(args, model, dataloader, rank):
             stride = max(10, (seq_len - window_size) // max_amount_of_windows)
             nlls = []
 
-            for begin_loc in range(0, seq_len - window_size + 1, stride):
+            for begin_loc in range(0, seq_len - window_size, stride):
                 end_loc = begin_loc + window_size
                 input_ids = batch_input_ids[:, begin_loc:end_loc]  # [B, W]
 
