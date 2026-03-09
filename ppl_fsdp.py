@@ -210,7 +210,7 @@ def sliding_window_ppl(args, model, dataloader, rank):
             stride = max(10, (seq_len - window_size) // max_amount_of_windows)
             nlls = []
 
-            for begin_loc in range(0, seq_len - window_size, stride):
+            for begin_loc in range(0, seq_len - window_size + 1, stride):
                 end_loc = begin_loc + window_size
                 input_ids = batch_input_ids[:, begin_loc:end_loc]  # [B, W]
 
@@ -233,7 +233,7 @@ def sliding_window_ppl(args, model, dataloader, rank):
 
                 T = min(T_logits, T_in)
                 logits = logits[:, :T, :]            # [B, T, V]
-                labels_all = input_ids[:, :T]        # [B, T]
+                labels_all = input_ids[:, -T:]       # [B, T]  — align with LAST T positions
 
                 logits_shift = logits[:, :-1, :]     # [B, T-1, V]
                 labels_shift = labels_all[:, 1:]     # [B, T-1]
