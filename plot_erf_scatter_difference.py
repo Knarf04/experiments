@@ -1,4 +1,5 @@
 import json
+import glob
 import os
 import argparse
 import numpy as np
@@ -18,43 +19,54 @@ def read_jsonl(filepath: str, max_records: int = 10000) -> list:
     return records
 
 
-def accumulate_means(records, skip_layers):
-    """Accumulate per-layer, per-head means for dt, forget, erf."""
+def accumulate_means(disp_name, skip_layers, max_records):
+    """Load per-layer JSONL files and accumulate per-layer, per-head means for dt, forget, erf."""
+    pattern = f"/gpfs/hshen/mmd/{disp_name}_layer*.jsonl"
+    layer_files = sorted(glob.glob(pattern))
+    if not layer_files:
+        print(f"No files found matching {pattern}")
+        return [], {}, {}, {}
+
     erf_sum, erf_n = {}, {}
     dt_sum, dt_n = {}, {}
     forget_sum, forget_n = {}, {}
 
-    for rec in records:
-        layer_idx = rec['layer_idx']
+    for fpath in layer_files:
+        records = read_jsonl(fpath, max_records)
+        if not records:
+            continue
+        layer_idx = records[0]['layer_idx']
         if layer_idx in skip_layers:
             continue
+        print(f"Loaded {len(records)} records from {fpath}")
 
-        dt = np.array(rec['dt'])          # (B, T, H)
-        forget = np.array(rec['forget'])  # (B, T, H)
-        erf = np.array(rec['erf'])        # (B, H)
+        for rec in records:
+            dt = np.array(rec['dt'])          # (B, T, H)
+            forget = np.array(rec['forget'])  # (B, T, H)
+            erf = np.array(rec['erf'])        # (B, H)
 
-        H = dt.shape[-1]
+            H = dt.shape[-1]
 
-        dt_flat = dt.reshape(-1, H)
-        if layer_idx not in dt_sum:
-            dt_sum[layer_idx] = np.zeros(H, dtype=np.float64)
-            dt_n[layer_idx] = 0
-        dt_sum[layer_idx] += dt_flat.sum(axis=0)
-        dt_n[layer_idx] += dt_flat.shape[0]
+            dt_flat = dt.reshape(-1, H)
+            if layer_idx not in dt_sum:
+                dt_sum[layer_idx] = np.zeros(H, dtype=np.float64)
+                dt_n[layer_idx] = 0
+            dt_sum[layer_idx] += dt_flat.sum(axis=0)
+            dt_n[layer_idx] += dt_flat.shape[0]
 
-        f_flat = forget.reshape(-1, H)
-        if layer_idx not in forget_sum:
-            forget_sum[layer_idx] = np.zeros(H, dtype=np.float64)
-            forget_n[layer_idx] = 0
-        forget_sum[layer_idx] += f_flat.sum(axis=0)
-        forget_n[layer_idx] += f_flat.shape[0]
+            f_flat = forget.reshape(-1, H)
+            if layer_idx not in forget_sum:
+                forget_sum[layer_idx] = np.zeros(H, dtype=np.float64)
+                forget_n[layer_idx] = 0
+            forget_sum[layer_idx] += f_flat.sum(axis=0)
+            forget_n[layer_idx] += f_flat.shape[0]
 
-        erf_flat = erf.reshape(-1, H)
-        if layer_idx not in erf_sum:
-            erf_sum[layer_idx] = np.zeros(H, dtype=np.float64)
-            erf_n[layer_idx] = 0
-        erf_sum[layer_idx] += erf_flat.sum(axis=0)
-        erf_n[layer_idx] += erf_flat.shape[0]
+            erf_flat = erf.reshape(-1, H)
+            if layer_idx not in erf_sum:
+                erf_sum[layer_idx] = np.zeros(H, dtype=np.float64)
+                erf_n[layer_idx] = 0
+            erf_sum[layer_idx] += erf_flat.sum(axis=0)
+            erf_n[layer_idx] += erf_flat.shape[0]
 
     layer_indices = sorted(erf_sum.keys())
     erf_mean = {k: erf_sum[k] / erf_n[k] for k in layer_indices}
@@ -85,64 +97,59 @@ def main():
     }
     skip_layers = attn_layers.get(model_type, [])
 
-    # Load both files
-    path1 = f"/gpfs/hshen/mmd/{name1}.jsonl"
-    path2 = f"/gpfs/hshen/mmd/{name2}.jsonl"
-    records1 = read_jsonl(path1, args.max_records)
-    records2 = read_jsonl(path2, args.max_records)
-    print(f"Loaded {len(records1)} records from {path1}")
-    print(f"Loaded {len(records2)} records from {path2}")
-
     # Accumulate means for each
-    layers1, erf1, dt1, forget1 = accumulate_means(records1, skip_layers)
-    layers2, erf2, dt2, forget2 = accumulate_means(records2, skip_layers)
+    layers1, erf1, dt1, forget1 = accumulate_means(name1, skip_layers, args.max_records)
+    layers2, erf2, dt2, forget2 = accumulate_means(name2, skip_layers, args.max_records)
 
     # Use intersection of layers present in both
     layer_indices = sorted(set(layers1) & set(layers2))
     assert len(layer_indices) > 0, "No common layers between the two files"
 
-    # Compute absolute differences per layer per head
-    diff_erf = {k: np.abs(erf1[k] - erf2[k]) for k in layer_indices}
-    diff_dt = {k: np.abs(dt1[k] - dt2[k]) for k in layer_indices}
-    diff_forget = {k: np.abs(forget1[k] - forget2[k]) for k in layer_indices}
+    # Compute signed differences per layer per head (name2 - name1)
+    diff_dt = {k: dt2[k] - dt1[k] for k in layer_indices}
+    diff_forget = {k: forget2[k] - forget1[k] for k in layer_indices}
+    log_erf_diff = {k: np.log(erf2[k] + 1e-12) - np.log(erf1[k] + 1e-12) for k in layer_indices}
 
-    # Log-ERF difference and unified x-axis
-    log_diff_erf = {k: np.log(diff_erf[k] + 1e-12) for k in layer_indices}
-    all_log_erf = np.concatenate([log_diff_erf[k] for k in layer_indices])
-    erf_xlim = (all_log_erf.min(), all_log_erf.max())
+    # Unified x-axis for log-ERF difference
+    all_log_erf_diff = np.concatenate([log_erf_diff[k] for k in layer_indices])
+    erf_xlim = (all_log_erf_diff.min(), all_log_erf_diff.max())
     erf_pad = (erf_xlim[1] - erf_xlim[0]) * 0.05
     erf_xlim = (erf_xlim[0] - erf_pad, erf_xlim[1] + erf_pad)
 
     out_dir = os.path.join(args.output_dir, f"{name1}_vs_{name2}")
     os.makedirs(out_dir, exist_ok=True)
-    title_prefix = f"{name1} vs {name2}"
+    title_prefix = f"{name2} − {name1}"
 
-    # ---- Combined plot: |ΔERF| vs |Δdt| ----
     cmap = plt.cm.viridis(np.linspace(0, 1, len(layer_indices)))
 
+    # ---- Combined plot: log(ERF_2)-log(ERF_1) vs Δdt ----
     fig, ax = plt.subplots(figsize=(6, 5))
     for i, layer_idx in enumerate(layer_indices):
-        ax.scatter(log_diff_erf[layer_idx], diff_dt[layer_idx],
+        ax.scatter(log_erf_diff[layer_idx], diff_dt[layer_idx],
                    c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
     ax.set_xlim(erf_xlim)
+    ax.axhline(0, color='grey', linewidth=0.5, linestyle='--')
+    ax.axvline(0, color='grey', linewidth=0.5, linestyle='--')
     ax.set_title(f"{title_prefix} — all layers", fontsize=11)
-    ax.set_xlabel(r"log |$\Delta$ERF|", fontsize=11, fontweight='bold')
-    ax.set_ylabel(r"|$\Delta$$\Delta_t$|", fontsize=11, fontweight='bold')
+    ax.set_xlabel(r"$\log \mathrm{ERF}_2 - \log \mathrm{ERF}_1$", fontsize=11, fontweight='bold')
+    ax.set_ylabel(r"$\Delta_t^{(2)} - \Delta_t^{(1)}$", fontsize=11, fontweight='bold')
     ax.legend(fontsize=6, ncol=2, loc='best')
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "[model]diff_erf_vs_dt.png"), dpi=600)
     plt.close(fig)
     print(f"Saved diff ERF vs dt plot to {out_dir}/")
 
-    # ---- Combined plot: |ΔERF| vs |Δforget| ----
+    # ---- Combined plot: log(ERF_2)-log(ERF_1) vs Δforget ----
     fig, ax = plt.subplots(figsize=(6, 5))
     for i, layer_idx in enumerate(layer_indices):
-        ax.scatter(log_diff_erf[layer_idx], diff_forget[layer_idx],
+        ax.scatter(log_erf_diff[layer_idx], diff_forget[layer_idx],
                    c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
     ax.set_xlim(erf_xlim)
+    ax.axhline(0, color='grey', linewidth=0.5, linestyle='--')
+    ax.axvline(0, color='grey', linewidth=0.5, linestyle='--')
     ax.set_title(f"{title_prefix} — all layers", fontsize=11)
-    ax.set_xlabel(r"log |$\Delta$ERF|", fontsize=11, fontweight='bold')
-    ax.set_ylabel(r"|$\Delta$forget gate|", fontsize=11, fontweight='bold')
+    ax.set_xlabel(r"$\log \mathrm{ERF}_2 - \log \mathrm{ERF}_1$", fontsize=11, fontweight='bold')
+    ax.set_ylabel(r"$f^{(2)} - f^{(1)}$", fontsize=11, fontweight='bold')
     ax.legend(fontsize=6, ncol=2, loc='best')
     fig.tight_layout()
     fig.savefig(os.path.join(out_dir, "[model]diff_erf_vs_forget.png"), dpi=600)

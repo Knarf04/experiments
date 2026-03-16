@@ -121,6 +121,8 @@ def convert_ssm_config_to_hf_config(mamba_config, blocks, **kwargs):
     )
     hf_config.architectures = ["NemotronHForCausalLM"]
     hf_config.max_position_embeddings = 262144
+    # vLLM reads rms_norm_eps instead of layer_norm_epsilon
+    hf_config.rms_norm_eps = hf_config.layer_norm_epsilon
     return hf_config
 
 
