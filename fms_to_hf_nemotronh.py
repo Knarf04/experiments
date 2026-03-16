@@ -120,6 +120,7 @@ def convert_ssm_config_to_hf_config(mamba_config, blocks, **kwargs):
         **kwargs,
     )
     hf_config.architectures = ["NemotronHForCausalLM"]
+    hf_config.max_position_embeddings = 262144
     return hf_config
 
 

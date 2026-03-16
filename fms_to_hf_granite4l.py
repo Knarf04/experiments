@@ -85,6 +85,7 @@ def convert_ssm_config_to_hf_config(mamba_config, emb_mult=1.0, res_mult=1.0,
         **kwargs,
     )
     hf_config.architectures = ["GraniteMoeHybridForCausalLM"]
+    hf_config.max_position_embeddings = 262144
     return hf_config
 
 

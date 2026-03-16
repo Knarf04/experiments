@@ -143,6 +143,7 @@ def convert_ssm_config_to_hf_config(
     if (vocab_size % pad_vocab_size_multiple) != 0:
         vocab_size += pad_vocab_size_multiple - (vocab_size % pad_vocab_size_multiple)
     hf_config.vocab_size = vocab_size
+    hf_config.max_position_embeddings = 262144
 
     return hf_config
 
