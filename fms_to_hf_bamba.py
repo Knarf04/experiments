@@ -307,14 +307,9 @@ def fms_to_hf(model_variant, load_path, save_path, tokenizer_path, precision="fp
     # Save new model to pytorch_dump_path
     dtype = torch.float32 if precision == "fp32" else (torch.bfloat16 if precision == "bf16" else torch.float16)
 
-    save_file_fn = None
-    if isinstance(save_model, bool) and save_model:
-        save_file_fn = save_single_safetensor
-    elif isinstance(save_model, str) and save_model == "sharded":
-        save_file_fn = save_sharded_safetensors
-
-    if save_file_fn:
-        save_file_fn({k: v.to(dtype) for k, v in state_dict.items()}, save_path, metadata={"format": "pt"})
+    if save_model:
+        state_dict_typed = {k: v.to(dtype) for k, v in state_dict.items()}
+        save_sharded_safetensors(state_dict_typed, save_path, metadata={"format": "pt"}, max_shard_size="500MB")
 
 
 if __name__ == "__main__":
