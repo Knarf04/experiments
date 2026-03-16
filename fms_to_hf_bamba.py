@@ -299,6 +299,8 @@ def fms_to_hf(model_variant, load_path, save_path, tokenizer_path, precision="fp
     print("Loading state dict...")
     # Load state dict of the original model and transfer to hf model
     state_dict = torch.load(load_path, map_location="cpu").get("model_state")
+    # Strip _orig_mod. prefix added by torch.compile
+    state_dict = {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
     # FIXME: allow other parameters to pass in
     state_dict = convert_state_dict_from_mamba_ssm(state_dict)
 
@@ -343,5 +345,6 @@ if __name__ == "__main__":
     # Verify conversion
     print("Verifying conversion...")
     fms_sd = torch.load(args.src_dir, map_location="cpu").get("model_state")
+    fms_sd = {k.removeprefix("_orig_mod."): v for k, v in fms_sd.items()}
     hf_sd = load_file(os.path.join(save_path, SAFE_WEIGHTS_NAME))
     verify_conversion(fms_sd, hf_sd)
