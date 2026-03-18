@@ -257,7 +257,6 @@ def sliding_window_ppl(args, model, dataloader, rank):
 
         print(ppls / (valid_ppls + 1e-6))
         dist.barrier()
-        break # make it only go through the forward pass once
 
     dist.all_reduce(ppls, op=dist.ReduceOp.SUM)
     dist.all_reduce(valid_ppls, op=dist.ReduceOp.SUM)
