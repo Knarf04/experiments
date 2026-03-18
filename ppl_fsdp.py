@@ -7,6 +7,7 @@ import functools
 
 import torch
 import torch.distributed as dist
+from tqdm import tqdm
 from torch.utils.data import DataLoader
 import torch.nn.functional as F
 
@@ -196,7 +197,8 @@ def sliding_window_ppl(args, model, dataloader, rank):
     ppls = torch.zeros(len(args.lengths), device=device)
     valid_ppls = torch.zeros(len(args.lengths), device=device)
 
-    for _, batch in enumerate(synchronized_dataloader_iterator(dataloader, rank)):
+    pbar = tqdm(synchronized_dataloader_iterator(dataloader, rank), desc="batches", disable=(rank != 0))
+    for _, batch in enumerate(pbar):
         batch_input_ids = batch["input_ids"].to(device, non_blocking=True)
         seq_len = batch_input_ids.size(1)
 
