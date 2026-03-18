@@ -168,9 +168,9 @@ def infer_transformer_layer_types(model):
 def synchronized_dataloader_iterator(dataloader, rank):
     iterator = iter(dataloader)
     device = torch.device(f"cuda:{rank}")
+    world_size = dist.get_world_size()
 
     while True:
-        batch = None
         has_local_data = 1
         try:
             batch = next(iterator)
@@ -180,7 +180,8 @@ def synchronized_dataloader_iterator(dataloader, rank):
         has_data_tensor = torch.tensor([has_local_data], dtype=torch.int, device=device)
         dist.all_reduce(has_data_tensor, op=dist.ReduceOp.SUM)
 
-        if has_data_tensor.item() == 0:
+        # Stop as soon as any rank runs out — uneven load causes FSDP AllGather deadlock
+        if has_data_tensor.item() < world_size:
             break
 
         yield batch
@@ -196,9 +197,6 @@ def sliding_window_ppl(args, model, dataloader, rank):
     valid_ppls = torch.zeros(len(args.lengths), device=device)
 
     for _, batch in enumerate(synchronized_dataloader_iterator(dataloader, rank)):
-        if batch is None:
-            continue
-
         batch_input_ids = batch["input_ids"].to(device, non_blocking=True)
         seq_len = batch_input_ids.size(1)
 
