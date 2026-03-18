@@ -69,8 +69,8 @@ def main():
     for i, layer_idx in enumerate(layer_indices):
         ax.scatter(log_erf_diff[layer_idx], diff_dt[layer_idx],
                    c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
-    ax.set_xlim((-0.8, 1.8))
-    ax.set_ylim((-0.24, 0.38))
+    # ax.set_xlim((-0.8, 1.8))
+    # ax.set_ylim((-0.24, 0.38))
     ax.axhline(0, color='grey', linewidth=0.5, linestyle='--')
     ax.axvline(0, color='grey', linewidth=0.5, linestyle='--')
     ax.set_title(f"{title_prefix} — all layers", fontsize=11)
@@ -87,8 +87,8 @@ def main():
     for i, layer_idx in enumerate(layer_indices):
         ax.scatter(log_erf_diff[layer_idx], diff_forget[layer_idx],
                    c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
-    ax.set_xlim((-0.8, 1.8))
-    ax.set_ylim((-0.22, 0.13))
+    # ax.set_xlim((-0.8, 1.8))
+    # ax.set_ylim((-0.22, 0.13))
     ax.axhline(0, color='grey', linewidth=0.5, linestyle='--')
     ax.axvline(0, color='grey', linewidth=0.5, linestyle='--')
     ax.set_title(f"{title_prefix} — all layers", fontsize=11)
