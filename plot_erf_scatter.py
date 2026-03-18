@@ -1,35 +1,32 @@
 import json
-import glob
 import os
 import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
 
-def read_jsonl(filepath: str, max_records: int = 10000) -> list:
-    records = []
-    with open(filepath, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            records.append(json.loads(line))
-            if len(records) >= max_records:
-                break
-    return records
+def load_summary(path: str) -> dict[int, dict]:
+    """Load summary JSON (from summarize.py --out) keyed by layer_idx."""
+    with open(path, encoding="utf-8") as f:
+        entries = json.load(f)
+    return {
+        int(e["layer_idx"]): {k: np.array(v) if isinstance(v, list) else v
+                               for k, v in e.items()}
+        for e in entries
+    }
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--disp-name", type=str, required=True,
-                        help="Display name / subdirectory used for JSONL path and output dir")
+    parser.add_argument("--summary", type=str, required=True,
+                        help="Path to summary JSON produced by summarize.py --out")
     parser.add_argument("--model-type", type=str, default="nemotronh")
     parser.add_argument("--output-dir", type=str, default="/gpfs/hshen/plots")
-    parser.add_argument("--max-records", type=int, default=10000)
+    parser.add_argument("--disp-name", type=str, default=None,
+                        help="Output subdirectory name (defaults to summary filename stem)")
     args = parser.parse_args()
 
-    model_type = args.model_type
-    disp_name = args.disp_name
+    disp_name = args.disp_name or os.path.splitext(os.path.basename(args.summary))[0]
     out_dir = os.path.join(args.output_dir, disp_name)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -38,72 +35,27 @@ def main():
         "nemotronh": [7, 18, 29, 40],
         "mamba2": [],
     }
-    skip_layers = attn_layers.get(model_type, [])
+    skip_layers = attn_layers.get(args.model_type, [])
 
-    # Load per-layer JSONL files
-    pattern = f"/gpfs/hshen/mmd/{disp_name}_layer*.jsonl"
-    layer_files = sorted(glob.glob(pattern))
-    if not layer_files:
-        print(f"No files found matching {pattern}")
+    data = load_summary(args.summary)
+    layer_indices = sorted(
+        k for k in data
+        if k not in skip_layers and "erf" in data[k] and "dt_mean" in data[k]
+    )
+    if not layer_indices:
+        print("No usable layers found in summary.")
         return
 
-    # ---- accumulate per-layer, per-head means for dt, forget, erf ----
-    erf_sum = {}
-    erf_n = {}
-    dt_sum = {}
-    dt_n = {}
-    forget_sum = {}
-    forget_n = {}
+    erf_mean    = {k: data[k]["erf"]         for k in layer_indices}  # [nheads]
+    dt_mean     = {k: data[k]["dt_mean"]     for k in layer_indices}  # [nheads]
+    forget_mean = {k: data[k]["forget_mean"] for k in layer_indices}  # [nheads]
 
-    for fpath in layer_files:
-        records = read_jsonl(fpath, args.max_records)
-        if not records:
-            continue
-        layer_idx = records[0]['layer_idx']
-        if layer_idx in skip_layers:
-            continue
-        print(f"Loaded {len(records)} records from {fpath}")
-
-        for rec in records:
-            dt = np.array(rec['dt'])          # (B, T, H)
-            forget = np.array(rec['forget'])  # (B, T, H)
-            erf = np.array(rec['erf'])        # (B, H)
-
-            H = dt.shape[-1]
-
-            dt_flat = dt.reshape(-1, H)
-            if layer_idx not in dt_sum:
-                dt_sum[layer_idx] = np.zeros(H, dtype=np.float64)
-                dt_n[layer_idx] = 0
-            dt_sum[layer_idx] += dt_flat.sum(axis=0)
-            dt_n[layer_idx] += dt_flat.shape[0]
-
-            f_flat = forget.reshape(-1, H)
-            if layer_idx not in forget_sum:
-                forget_sum[layer_idx] = np.zeros(H, dtype=np.float64)
-                forget_n[layer_idx] = 0
-            forget_sum[layer_idx] += f_flat.sum(axis=0)
-            forget_n[layer_idx] += f_flat.shape[0]
-
-            erf_flat = erf.reshape(-1, H)
-            if layer_idx not in erf_sum:
-                erf_sum[layer_idx] = np.zeros(H, dtype=np.float64)
-                erf_n[layer_idx] = 0
-            erf_sum[layer_idx] += erf_flat.sum(axis=0)
-            erf_n[layer_idx] += erf_flat.shape[0]
-
-    # compute per-head means
-    layer_indices = sorted(erf_sum.keys())
-    erf_mean = {k: erf_sum[k] / erf_n[k] for k in layer_indices}
-    dt_mean = {k: dt_sum[k] / dt_n[k] for k in layer_indices}
-    forget_mean = {k: forget_sum[k] / forget_n[k] for k in layer_indices}
-
-    # compute log-ERF per layer and find global range for unified x-axis
     log_erf = {k: np.log(erf_mean[k] + 1e-12) for k in layer_indices}
     all_log_erf = np.concatenate([log_erf[k] for k in layer_indices])
-    erf_xlim = (all_log_erf.min(), all_log_erf.max())
-    erf_pad = (erf_xlim[1] - erf_xlim[0]) * 0.05
-    erf_xlim = (erf_xlim[0] - erf_pad, erf_xlim[1] + erf_pad)
+    pad = (all_log_erf.max() - all_log_erf.min()) * 0.05
+    erf_xlim = (all_log_erf.min() - pad, all_log_erf.max() + pad)
+
+    cmap = plt.cm.viridis(np.linspace(0, 1, len(layer_indices)))
 
     # ---- Per-layer plots: ERF vs dt ----
     for layer_idx in layer_indices:
@@ -119,9 +71,9 @@ def main():
 
     # combined
     fig, ax = plt.subplots(figsize=(6, 5))
-    cmap = plt.cm.viridis(np.linspace(0, 1, len(layer_indices)))
     for i, layer_idx in enumerate(layer_indices):
-        ax.scatter(log_erf[layer_idx], dt_mean[layer_idx], c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
+        ax.scatter(log_erf[layer_idx], dt_mean[layer_idx],
+                   c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
     ax.set_xlim(erf_xlim)
     ax.set_title("All layers", fontsize=11)
     ax.set_xlabel("log-ERF", fontsize=11, fontweight='bold')
@@ -147,7 +99,8 @@ def main():
     # combined
     fig, ax = plt.subplots(figsize=(6, 5))
     for i, layer_idx in enumerate(layer_indices):
-        ax.scatter(log_erf[layer_idx], forget_mean[layer_idx], c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
+        ax.scatter(log_erf[layer_idx], forget_mean[layer_idx],
+                   c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
     ax.set_xlim(erf_xlim)
     ax.set_title("All layers", fontsize=11)
     ax.set_xlabel("log-ERF", fontsize=11, fontweight='bold')

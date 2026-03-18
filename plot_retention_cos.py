@@ -1,5 +1,4 @@
 import json
-import glob
 import os
 import argparse
 import numpy as np
@@ -8,17 +7,15 @@ import matplotlib.ticker as ticker
 from matplotlib.backends.backend_pdf import PdfPages
 
 
-def read_jsonl(filepath: str, max_records: int = 10000) -> list:
-    records = []
-    with open(filepath, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            records.append(json.loads(line))
-            if len(records) >= max_records:
-                break
-    return records
+def load_summary(path: str) -> dict[int, dict]:
+    """Load summary JSON (from summarize.py --out) keyed by layer_idx."""
+    with open(path, encoding="utf-8") as f:
+        entries = json.load(f)
+    return {
+        int(e["layer_idx"]): {k: np.array(v) if isinstance(v, list) else v
+                               for k, v in e.items()}
+        for e in entries
+    }
 
 
 def lag_profile(mat_h, npos):
@@ -37,15 +34,15 @@ def lag_profile(mat_h, npos):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--disp-name", type=str, required=True,
-                        help="Display name / subdirectory used for JSONL path and output dir")
+    parser.add_argument("--summary", type=str, required=True,
+                        help="Path to summary JSON produced by summarize.py --out")
     parser.add_argument("--model-type", type=str, default="bamba2")
     parser.add_argument("--output-dir", type=str, default="/gpfs/hshen/plots")
-    parser.add_argument("--max-records", type=int, default=10000)
+    parser.add_argument("--disp-name", type=str, default=None,
+                        help="Output subdirectory name (defaults to summary filename stem)")
     args = parser.parse_args()
 
-    disp_name = args.disp_name
-    model_type = args.model_type
+    disp_name = args.disp_name or os.path.splitext(os.path.basename(args.summary))[0]
     out_dir = os.path.join(args.output_dir, disp_name)
     os.makedirs(out_dir, exist_ok=True)
 
@@ -54,50 +51,19 @@ def main():
         "nemotronh": [7, 18, 29, 40],
         "mamba2": [],
     }
-    skip_layers = attn_layers.get(model_type, [])
+    skip_layers = attn_layers.get(args.model_type, [])
 
-    pattern = f"/gpfs/hshen/mmd/{disp_name}/layer*.jsonl"
-    layer_files = sorted(glob.glob(pattern))
-    if not layer_files:
-        print(f"No files found matching {pattern}")
+    data = load_summary(args.summary)
+    layer_indices = sorted(
+        k for k in data
+        if k not in skip_layers and "state_cos_sim" in data[k]
+    )
+    if not layer_indices:
+        print("No state_cos_sim data found in summary.")
         return
 
-    # Accumulate per-head: cos_sum[layer_idx] shape (H, npos, npos), average over batch only
-    cos_sum = {}   # layer_idx -> (H, npos, npos) float64
-    cos_n = {}     # layer_idx -> int (number of batch samples)
-
-    for fpath in layer_files:
-        records = read_jsonl(fpath, args.max_records)
-        if not records:
-            continue
-        layer_idx = records[0]['layer_idx']
-        if layer_idx in skip_layers:
-            continue
-        print(f"Loaded {len(records)} records from {fpath}")
-
-        for rec in records:
-            if 'state_cos_sim' not in rec:
-                continue
-            # shape: (B, H, npos, npos)
-            mat = np.array(rec['state_cos_sim'], dtype=np.float64)
-            B, H, npos, _ = mat.shape
-
-            # Sum over batch only -> (H, npos, npos)
-            mat_sum = mat.sum(axis=0)
-
-            if layer_idx not in cos_sum:
-                cos_sum[layer_idx] = np.zeros((H, npos, npos), dtype=np.float64)
-                cos_n[layer_idx] = 0
-            cos_sum[layer_idx] += mat_sum
-            cos_n[layer_idx] += B
-
-    if not cos_sum:
-        print("No state_cos_sim data found in any record.")
-        return
-
-    layer_indices = sorted(cos_sum.keys())
-    # cos_mean[layer_idx]: (H, npos, npos)
-    cos_mean = {k: cos_sum[k] / cos_n[k] for k in layer_indices}
+    # cos_mean[layer_idx]: (nheads, npos, npos) — already batch-averaged by summarize.py
+    cos_mean = {k: data[k]["state_cos_sim"] for k in layer_indices}
 
     pdf_path = os.path.join(out_dir, f"{disp_name}_retention_cos.pdf")
     with PdfPages(pdf_path) as pdf:
@@ -109,7 +75,7 @@ def main():
 
             ncols = min(8, H)
             nrows = (H + ncols - 1) // ncols
-            cell = min(1.8, 12.0 / ncols)  # cap figure width at ~14 in
+            cell = min(1.8, 12.0 / ncols)
             fig, axes = plt.subplots(nrows, ncols,
                                      figsize=(cell * ncols, cell * nrows + 0.6),
                                      squeeze=False)
@@ -159,8 +125,7 @@ def main():
             ax.set_ylabel("Mean cosine similarity", fontsize=11, fontweight='bold')
             ax.set_title(f"Layer {layer_idx} — per-head retention lag profile", fontsize=11)
             ax.set_ylim(bottom=0.0)
-            ncol_legend = max(1, H // 10)
-            ax.legend(fontsize=5, ncol=ncol_legend, loc='upper right',
+            ax.legend(fontsize=5, ncol=max(1, H // 10), loc='upper right',
                       framealpha=0.6, handlelength=1.0)
             fig.tight_layout()
             pdf.savefig(fig)
@@ -172,7 +137,7 @@ def main():
 
         for idx_i, layer_idx in enumerate(layer_indices):
             mat = cos_mean[layer_idx]       # (H, npos, npos)
-            mat_avg = mat.mean(axis=0)      # (npos, npos) — avg over heads for summary
+            mat_avg = mat.mean(axis=0)      # (npos, npos)
             npos = mat_avg.shape[0]
             lags, means = lag_profile(mat_avg, npos)
             ax.plot(lags, means, color=layer_colors[idx_i], linewidth=1.2, label=f"L{layer_idx}")
