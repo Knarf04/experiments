@@ -21,7 +21,7 @@ def read_jsonl(filepath: str, max_records: int = 10000) -> list:
 
 def accumulate_means(disp_name, skip_layers, max_records):
     """Load per-layer JSONL files and accumulate per-layer, per-head means for dt, forget, erf."""
-    pattern = f"/gpfs/hshen/mmd/{disp_name}_layer*.jsonl"
+    pattern = f"/gpfs/hshen/mmd/{disp_name}/layer*.jsonl"
     layer_files = sorted(glob.glob(pattern))
     if not layer_files:
         print(f"No files found matching {pattern}")
@@ -41,32 +41,29 @@ def accumulate_means(disp_name, skip_layers, max_records):
         print(f"Loaded {len(records)} records from {fpath}")
 
         for rec in records:
-            dt = np.array(rec['dt'])          # (B, T, H)
-            forget = np.array(rec['forget'])  # (B, T, H)
-            erf = np.array(rec['erf'])        # (B, H)
+            dt_mean  = np.array(rec['dt_mean']).reshape(-1, np.array(rec['dt_mean']).shape[-1])    # (B, H)
+            forget_m = np.array(rec['forget_mean']).reshape(-1, np.array(rec['forget_mean']).shape[-1])  # (B, H)
+            erf      = np.array(rec['erf']).reshape(-1, np.array(rec['erf']).shape[-1])            # (B, H)
 
-            H = dt.shape[-1]
+            H = dt_mean.shape[-1]
 
-            dt_flat = dt.reshape(-1, H)
             if layer_idx not in dt_sum:
                 dt_sum[layer_idx] = np.zeros(H, dtype=np.float64)
                 dt_n[layer_idx] = 0
-            dt_sum[layer_idx] += dt_flat.sum(axis=0)
-            dt_n[layer_idx] += dt_flat.shape[0]
+            dt_sum[layer_idx] += dt_mean.sum(axis=0)
+            dt_n[layer_idx] += dt_mean.shape[0]
 
-            f_flat = forget.reshape(-1, H)
             if layer_idx not in forget_sum:
                 forget_sum[layer_idx] = np.zeros(H, dtype=np.float64)
                 forget_n[layer_idx] = 0
-            forget_sum[layer_idx] += f_flat.sum(axis=0)
-            forget_n[layer_idx] += f_flat.shape[0]
+            forget_sum[layer_idx] += forget_m.sum(axis=0)
+            forget_n[layer_idx] += forget_m.shape[0]
 
-            erf_flat = erf.reshape(-1, H)
             if layer_idx not in erf_sum:
                 erf_sum[layer_idx] = np.zeros(H, dtype=np.float64)
                 erf_n[layer_idx] = 0
-            erf_sum[layer_idx] += erf_flat.sum(axis=0)
-            erf_n[layer_idx] += erf_flat.shape[0]
+            erf_sum[layer_idx] += erf.sum(axis=0)
+            erf_n[layer_idx] += erf.shape[0]
 
     layer_indices = sorted(erf_sum.keys())
     erf_mean = {k: erf_sum[k] / erf_n[k] for k in layer_indices}
@@ -127,7 +124,8 @@ def main():
     for i, layer_idx in enumerate(layer_indices):
         ax.scatter(log_erf_diff[layer_idx], diff_dt[layer_idx],
                    c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
-    ax.set_xlim(erf_xlim)
+    ax.set_xlim((-0.8, 1.8))
+    ax.set_ylim((-0.24, 0.38))
     ax.axhline(0, color='grey', linewidth=0.5, linestyle='--')
     ax.axvline(0, color='grey', linewidth=0.5, linestyle='--')
     ax.set_title(f"{title_prefix} — all layers", fontsize=11)
@@ -144,7 +142,8 @@ def main():
     for i, layer_idx in enumerate(layer_indices):
         ax.scatter(log_erf_diff[layer_idx], diff_forget[layer_idx],
                    c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
-    ax.set_xlim(erf_xlim)
+    ax.set_xlim((-0.8, 1.8))
+    ax.set_ylim((-0.22, 0.13))
     ax.axhline(0, color='grey', linewidth=0.5, linestyle='--')
     ax.axvline(0, color='grey', linewidth=0.5, linestyle='--')
     ax.set_title(f"{title_prefix} — all layers", fontsize=11)

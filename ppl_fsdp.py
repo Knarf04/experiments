@@ -313,12 +313,15 @@ def main():
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model,
+    model_kwargs = dict(
         trust_remote_code=True,
         torch_dtype=torch.bfloat16 if args.bf16 else torch.float16,
         low_cpu_mem_usage=True,
     )
+    if any(k in args.model.lower() for k in ("nemotron", "bamba", "mamba")):
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+
+    model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs)
     model.eval()
     # Some models keep large KV cache flags on; not needed for loss-only eval
     if hasattr(model.config, "use_cache"):
