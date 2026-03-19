@@ -189,35 +189,46 @@ def synchronized_dataloader_iterator(dataloader, rank):
 
 
 @torch.no_grad()
-def sliding_window_ppl(args, model, dataloader, rank):
+def sliding_window_ppl(args, model, dataloader, rank, experiments=None):
     device = torch.device(f"cuda:{rank}")
     max_amount_of_windows = 10
     k_tail = 100
 
-    ppls = torch.zeros(len(args.lengths), device=device)
-    valid_ppls = torch.zeros(len(args.lengths), device=device)
+    total_nll = torch.zeros(len(args.lengths), device=device, dtype=torch.float64)
+    total_tok = torch.zeros(len(args.lengths), device=device, dtype=torch.long)
 
     pbar = tqdm(synchronized_dataloader_iterator(dataloader, rank), desc="batches", disable=(rank != 0))
-    for _, batch in enumerate(pbar):
-        batch_input_ids = batch["input_ids"].to(device, non_blocking=True)
-        seq_len = batch_input_ids.size(1)
+    for batch in pbar:
+        batch_input_ids      = batch["input_ids"].to(device, non_blocking=True)       # [B, max_len]
+        batch_attention_mask = batch["attention_mask"].to(device, non_blocking=True)  # [B, max_len]
+        seq_len = batch_input_ids.size(1)  # always max_length — same on all ranks ✓
 
         for i, L in enumerate(args.lengths):
             window_size = int(L)
             if seq_len < window_size:
-                continue
-
+                continue  # consistent across all ranks ✓
             stride = max(10, (seq_len - window_size) // max_amount_of_windows)
-            nlls = []
+            # stride is deterministic from seq_len — same on all ranks ✓
 
             for begin_loc in range(0, seq_len - window_size + 1, stride):
                 end_loc = begin_loc + window_size
-                input_ids = batch_input_ids[:, begin_loc:end_loc]  # [B, W]
+                input_ids      = batch_input_ids[:, begin_loc:end_loc]      # [B, W]
+                attention_mask = batch_attention_mask[:, begin_loc:end_loc]  # [B, W]
 
+                # A sample is valid only if the entire window contains no padding
+                valid_samples = attention_mask.all(dim=1)  # [B] bool
+
+                # Tell model which samples are valid (for logit/state recording in Bamba layers)
+                if experiments is not None:
+                    experiments["valid_mask"] = valid_samples.cpu().tolist()
+
+                # Always call model — FSDP requires identical collectives on all ranks ✓
                 if "zamba2" in args.model.lower():
-                    outputs = model(input_ids, num_logits_to_keep=k_tail + 1)
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask,
+                                    num_logits_to_keep=k_tail + 1)
                 elif any(k in args.model.lower() for k in ("bamba", "nemotron", "mamba")):
-                    outputs = model(input_ids, num_logits_to_keep=k_tail + 1, use_cache=False)
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask,
+                                    num_logits_to_keep=k_tail + 1, use_cache=False)
                 else:
                     inference_params = {
                         "max_seqlen": window_size + 1,
@@ -225,42 +236,41 @@ def sliding_window_ppl(args, model, dataloader, rank):
                         "seqlen_offset": 0,
                         "batch_size_offset": 0,
                     }
-                    outputs, _ = model(input_ids, num_last_tokens=k_tail + 1, inference_params=inference_params)
+                    outputs, _ = model(input_ids, attention_mask=attention_mask,
+                                       num_last_tokens=k_tail + 1,
+                                       inference_params=inference_params)
 
-                logits = outputs.logits  # expected [B, T, V]; T may be <= window_size or == k_tail+1
-                B, T_logits, V = logits.shape
-                T_in = input_ids.size(1)
+                # Discard results if no sample in the batch is fully padding-free
+                if not valid_samples.any():
+                    continue
 
-                T = min(T_logits, T_in)
-                logits = logits[:, :T, :]            # [B, T, V]
-                labels_all = input_ids[:, -T:]       # [B, T]  — align with LAST T positions
+                logits = outputs.logits
+                V = logits.size(-1)
+                T = min(logits.size(1), input_ids.size(1))
+                logits = logits[:, :T, :]
+                labels = input_ids[:, -T:]
 
-                logits_shift = logits[:, :-1, :]     # [B, T-1, V]
-                labels_shift = labels_all[:, 1:]     # [B, T-1]
-                k_eff = min(k_tail, logits_shift.size(1))
+                shift_logits = logits[:, :-1, :].contiguous().float()
+                shift_labels = labels[:, 1:].contiguous()
+                k_eff = min(k_tail, shift_labels.size(1))
                 if k_eff == 0:
                     continue
 
-                logits_tail = logits_shift[:, -k_eff:, :].contiguous()   # [B, k, V]
-                labels_tail = labels_shift[:, -k_eff:].contiguous()      # [B, k]
+                # Accumulate only for valid (fully padding-free) samples
+                valid_logits = shift_logits[valid_samples, -k_eff:, :]  # [n_valid, k_eff, V]
+                valid_labels = shift_labels[valid_samples, -k_eff:]     # [n_valid, k_eff]
 
-                loss = F.cross_entropy(
-                    logits_tail.view(-1, V),
-                    labels_tail.view(-1),
-                    reduction="mean",
+                nll_sum = F.cross_entropy(
+                    valid_logits.reshape(-1, V),
+                    valid_labels.reshape(-1),
+                    reduction="sum",
                 )
-                nlls.append(loss)
+                total_nll[i] += nll_sum.double()
+                total_tok[i] += valid_samples.sum().item() * k_eff
 
-            if nlls:
-                ppls[i] += torch.exp(torch.stack(nlls).mean()).to(torch.float32)
-                valid_ppls[i] += 1
-
-        print(ppls / (valid_ppls + 1e-6))
-        dist.barrier()
-
-    dist.all_reduce(ppls, op=dist.ReduceOp.SUM)
-    dist.all_reduce(valid_ppls, op=dist.ReduceOp.SUM)
-    return ppls, valid_ppls
+    dist.all_reduce(total_nll, op=dist.ReduceOp.SUM)
+    dist.all_reduce(total_tok, op=dist.ReduceOp.SUM)
+    return total_nll, total_tok
 
 
 def main():
@@ -297,7 +307,7 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = getattr(tokenizer, "eos_token", tokenizer.unk_token)
-    tokenizer.padding_side = "left"
+    tokenizer.padding_side = "right"
 
     # lengths = [131072, 65536, 32768, 16384, 8192, 4096, 2048]
     # args.lengths = [int(L) for L in lengths if int(L) <= args.max_length]
@@ -326,6 +336,11 @@ def main():
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
 
+    # Grab the experiments dict before FSDP moves the module.
+    # self.experiments in each Bamba layer is a reference to this same dict,
+    # so mutations made between forward calls remain visible to all layers.
+    experiments = getattr(model.config, "experiments", None)
+
     # FSDP wrapping
     # CHANGED: use infer_transformer_layer_types to make this robust
     layer_types = infer_transformer_layer_types(model) or set()
@@ -345,13 +360,17 @@ def main():
 
     try:
         print("Starting evaluation...")
-        ppls, valid_ppls = sliding_window_ppl(args, fsdp_model, dataloader, rank)
-        ppls = ppls / valid_ppls
+        total_nll, total_tok = sliding_window_ppl(args, fsdp_model, dataloader, rank,
+                                                  experiments=experiments)
 
         if rank == 0:
             print("[Perplexity]")
-            for i, ppl in enumerate(ppls):
-                print(f"{args.lengths[i]}: {ppl}")
+            for i, L in enumerate(args.lengths):
+                if total_tok[i] == 0:
+                    print(f"{L}: N/A (no valid windows — all samples shorter than window size)")
+                else:
+                    ppl = torch.exp(total_nll[i] / total_tok[i].double()).item()
+                    print(f"{L}: {ppl:.2f}")
     finally:
         dist.destroy_process_group()
 
