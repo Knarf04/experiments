@@ -54,7 +54,7 @@ def build_window_dataset(args, tokenizer, window_size: int, stride: int):
         processed_docs += 1
         tokens = tokenizer(
             doc[args.feature],
-            add_special_tokens=False,
+            add_special_tokens=True,
             truncation=False,
             return_attention_mask=False,
         )["input_ids"]
@@ -235,7 +235,6 @@ def main():
     model_kwargs = dict(
         trust_remote_code=True,
         torch_dtype=torch.bfloat16 if args.bf16 else torch.float16,
-        low_cpu_mem_usage=True,
     )
     if any(k in args.model.lower() for k in ("nemotron", "bamba", "mamba")):
         model_kwargs["attn_implementation"] = "flash_attention_2"
