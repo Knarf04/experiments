@@ -22,7 +22,6 @@ def main():
                         help="First summary JSON (produced by summarize.py --out)")
     parser.add_argument("--summary2", type=str, required=True,
                         help="Second summary JSON")
-    parser.add_argument("--model-type", type=str, default="nemotronh")
     parser.add_argument("--output-dir", type=str, default="/gpfs/hshen/plots")
     parser.add_argument("--name1", type=str, default=None,
                         help="Label for summary1 (defaults to filename stem)")
@@ -33,17 +32,10 @@ def main():
     name1 = args.name1 or os.path.splitext(os.path.basename(args.summary1))[0]
     name2 = args.name2 or os.path.splitext(os.path.basename(args.summary2))[0]
 
-    attn_layers = {
-        "bamba2": [9, 18, 27],
-        "nemotronh": [7, 18, 29, 40],
-        "mamba2": [],
-    }
-    skip_layers = attn_layers.get(args.model_type, [])
-
     data1 = load_summary(args.summary1)
     data2 = load_summary(args.summary2)
 
-    layer_indices = sorted(set(data1) & set(data2) - set(skip_layers))
+    layer_indices = sorted(set(data1) & set(data2))
     assert layer_indices, "No common layers between the two summaries"
 
     erf1    = {k: data1[k]["erf"]         for k in layer_indices}

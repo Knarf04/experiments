@@ -20,7 +20,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--summary", type=str, required=True,
                         help="Path to summary JSON produced by summarize.py --out")
-    parser.add_argument("--model-type", type=str, default="nemotronh")
     parser.add_argument("--output-dir", type=str, default="/gpfs/hshen/plots")
     parser.add_argument("--disp-name", type=str, default=None,
                         help="Output subdirectory name (defaults to summary filename stem)")
@@ -30,17 +29,9 @@ def main():
     out_dir = os.path.join(args.output_dir, disp_name)
     os.makedirs(out_dir, exist_ok=True)
 
-    attn_layers = {
-        "bamba2": [9, 18, 27],
-        "nemotronh": [7, 18, 29, 40],
-        "mamba2": [],
-    }
-    skip_layers = attn_layers.get(args.model_type, [])
-
     data = load_summary(args.summary)
     layer_indices = sorted(
-        k for k in data
-        if k not in skip_layers and "erf" in data[k] and "dt_mean" in data[k]
+        k for k in data if "erf" in data[k] and "dt_mean" in data[k]
     )
     if not layer_indices:
         print("No usable layers found in summary.")
