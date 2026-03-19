@@ -63,20 +63,19 @@ def main():
         for k in layer_indices
     }
 
-    log_erf = {k: np.log(erf_mean[k] + 1e-12) for k in layer_indices}
-    all_log_erf = np.concatenate([log_erf[k] for k in layer_indices])
-    pad = (all_log_erf.max() - all_log_erf.min()) * 0.05
-    erf_xlim = (all_log_erf.min() - pad, all_log_erf.max() + pad)
+    all_erf = np.concatenate([erf_mean[k] for k in layer_indices])
+    pad = (all_erf.max() - all_erf.min()) * 0.05
+    erf_xlim = (all_erf.min() - pad, all_erf.max() + pad)
 
     cmap = plt.cm.viridis(np.linspace(0, 1, len(layer_indices)))
 
     # ---- Per-layer scatter plots ----
     for layer_idx in layer_indices:
         fig, ax = plt.subplots(figsize=(5, 4.5))
-        ax.scatter(log_erf[layer_idx], cos_mean[layer_idx], marker='.', s=10)
+        ax.scatter(erf_mean[layer_idx], cos_mean[layer_idx], marker='.', s=10)
         ax.set_xlim(erf_xlim)
         ax.set_title(f"Layer {layer_idx}", fontsize=11)
-        ax.set_xlabel("log-ERF", fontsize=11, fontweight='bold')
+        ax.set_xlabel("ERF", fontsize=11, fontweight='bold')
         ax.set_ylabel("Mean state cosine similarity", fontsize=11, fontweight='bold')
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, f"[layer{layer_idx}]erf_vs_cos_sim.png"), dpi=600)
@@ -85,11 +84,11 @@ def main():
     # ---- Combined all-layers scatter ----
     fig, ax = plt.subplots(figsize=(6, 5))
     for i, layer_idx in enumerate(layer_indices):
-        ax.scatter(log_erf[layer_idx], cos_mean[layer_idx],
+        ax.scatter(erf_mean[layer_idx], cos_mean[layer_idx],
                    c=[cmap[i]], marker='.', s=10, label=f"L{layer_idx}")
     ax.set_xlim(erf_xlim)
     ax.set_title("All layers", fontsize=11)
-    ax.set_xlabel("log-ERF", fontsize=11, fontweight='bold')
+    ax.set_xlabel("ERF", fontsize=11, fontweight='bold')
     ax.set_ylabel("Mean state cosine similarity", fontsize=11, fontweight='bold')
     ax.legend(fontsize=6, ncol=2, loc='best')
     fig.tight_layout()
