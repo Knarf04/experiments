@@ -260,7 +260,8 @@ def main():
         if type(module) in layer_types:
             fully_shard(module, **fsdp_kwargs)
     fully_shard(model, **fsdp_kwargs)
-    model.to(device)  # each rank holds only 1/world_size of params after sharding
+    if not args.cpu_offload:
+        model.to(device)  # each rank holds only 1/world_size of params after sharding
     fsdp_model = model
 
     try:
