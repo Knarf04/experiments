@@ -1,21 +1,16 @@
 import os
-import sys
 import argparse
-import math
-from typing import Dict, Iterable
 import functools
+from typing import List
 
 import torch
 import torch.distributed as dist
 from tqdm import tqdm
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 import torch.nn.functional as F
 
-from transformers import (
-    AutoTokenizer,
-    AutoModelForCausalLM,
-    DataCollatorForLanguageModeling,
-)
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import datasets
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -23,133 +18,65 @@ from torch.distributed.fsdp import ShardingStrategy, CPUOffload
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 
 
-# CHANGED: add feature_name, world_size, rank, local_sample_size and DDP-aware sharding
-def build_streaming_iterable(
-    hf_iterable,
-    tokenizer,
-    max_length,
-    feature_name: str,
-    world_size: int,
-    rank: int,
-    local_sample_size: int,
-) -> Iterable[Dict[str, list]]:
-    processed = 0
-    for idx, sequence in enumerate(hf_iterable):
-        # simple per-sample sharding by index
-        if idx % world_size != rank:
-            continue
-
-        if local_sample_size > 0 and processed >= local_sample_size:
-            break
-
-        text = sequence[feature_name]  # CHANGED: use configurable feature, not hard-coded "text"
-        tok = tokenizer(
-            text,
-            add_special_tokens=False,
-            padding="max_length",
-            truncation=True,
-            max_length=max_length,
-            return_attention_mask=True,
-        )
-        yield {
-            "input_ids": tok["input_ids"],
-            "attention_mask": tok["attention_mask"],
-            "tokenized_len": len(tok["input_ids"]),
-        }
-        processed += 1
+def make_windows(tokens: List[int], window_size: int, stride: int) -> List[List[int]]:
+    """Slice a token list into fixed-length sliding windows.
+    Returns [] when the document is shorter than window_size.
+    """
+    assert stride > 0, "stride must be positive"
+    T = len(tokens)
+    if T < window_size:
+        return []
+    return [tokens[start : start + window_size]
+            for start in range(0, T - window_size + 1, stride)]
 
 
-def build_dataloader(args, tokenizer, rank, world_size, local_sample_size) -> DataLoader:
+def build_window_dataset(args, tokenizer, window_size: int, stride: int):
+    """Tokenize each document and emit sliding windows of exactly window_size tokens.
+
+    No padding, no truncation.  Documents shorter than window_size are skipped.
+    The full dataset is built on every rank; DistributedSampler handles sharding.
+    """
     if args.streaming:
         raw = datasets.load_dataset(
-            args.dataset,
-            name=args.subset,
-            split=args.split,
-            streaming=True,
-            trust_remote_code=True,
+            args.dataset, name=args.subset, split=args.split,
+            streaming=True, trust_remote_code=True,
         )
-
-        # CHANGED: remove .shard(); not supported in streaming mode
-        # raw = raw.shard(num_shards=world_size, index=rank)
-
         if args.shuffle_buffer > 0:
             raw = raw.shuffle(seed=args.seed, buffer_size=args.shuffle_buffer)
-
-        # CHANGED: wrap HF iterable with our DDP-aware, tokenizing generator
-        tokenized_iterable = datasets.IterableDataset.from_generator(
-            lambda: build_streaming_iterable(
-                hf_iterable=raw,
-                tokenizer=tokenizer,
-                max_length=args.max_length,
-                feature_name=args.feature,
-                world_size=world_size,
-                rank=rank,
-                local_sample_size=local_sample_size,
-            )
-        )
-
-        collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-
-        loader = DataLoader(
-            tokenized_iterable,
-            batch_size=args.batch_size,
-            shuffle=False,
-            num_workers=0,  # CHANGED: generator + multiprocessing is messy; keep 0
-            pin_memory=True,
-            collate_fn=collator,
-        )
-        return loader
-
     else:
         raw = datasets.load_dataset(
-            args.dataset,
-            name=args.subset,
-            split=args.split,
+            args.dataset, name=args.subset, split=args.split,
             trust_remote_code=True,
         )
 
-        def tok_fn(batch):
-            texts = batch[args.feature]
-            tok = tokenizer(
-                texts,
-                add_special_tokens=False,
-                padding="max_length",
-                truncation=True,
-                max_length=args.max_length,
-                return_attention_mask=True,
-            )
-            return {
-                "input_ids": tok["input_ids"],
-                "attention_mask": tok["attention_mask"],
-                "tokenized_len": [len(x) for x in tok["input_ids"]],
-            }
+    all_windows: List[List[int]] = []
+    n_docs = 0
+    for doc in raw:
+        if args.sample_size > 0 and n_docs >= args.sample_size:
+            break
+        tokens = tokenizer(
+            doc[args.feature],
+            add_special_tokens=False,
+            truncation=False,
+            return_attention_mask=False,
+        )["input_ids"]
+        wins = make_windows(tokens, window_size, stride)
+        all_windows.extend(wins)
+        if wins:
+            n_docs += 1
 
-        remove_cols = [c for c in raw.column_names if c not in {args.feature}]
-        tokenized = raw.map(
-            tok_fn,
-            batched=True,
-            num_proc=args.num_proc,
-            remove_columns=remove_cols,
-            desc="Tokenizing (in-memory)",
+    if not all_windows:
+        raise RuntimeError(
+            f"No windows produced. All documents may be shorter than "
+            f"window_size={window_size}. Check --max-length and --stride."
         )
 
-        collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    return datasets.Dataset.from_dict({"input_ids": all_windows})
 
-        from torch.utils.data.distributed import DistributedSampler
-        sampler = DistributedSampler(
-            tokenized, rank=rank, num_replicas=world_size, shuffle=True, drop_last=False
-        )
 
-        loader = DataLoader(
-            tokenized,
-            batch_size=args.batch_size,
-            sampler=sampler,
-            num_workers=args.num_workers,
-            pin_memory=True,
-            collate_fn=collator,
-            persistent_workers=False if args.num_workers == 0 else True,
-        )
-        return loader
+def collate_windows(batch):
+    """Stack fixed-length windows into a batch tensor — no padding needed."""
+    return {"input_ids": torch.tensor([x["input_ids"] for x in batch], dtype=torch.long)}
 
 
 def infer_transformer_layer_types(model):
@@ -166,136 +93,105 @@ def infer_transformer_layer_types(model):
     return set(candidates) if candidates else None
 
 
-def synchronized_dataloader_iterator(dataloader, rank):
-    iterator = iter(dataloader)
-    device = torch.device(f"cuda:{rank}")
-    world_size = dist.get_world_size()
-
-    while True:
-        has_local_data = 1
-        try:
-            batch = next(iterator)
-        except StopIteration:
-            has_local_data = 0
-
-        has_data_tensor = torch.tensor([has_local_data], dtype=torch.int, device=device)
-        dist.all_reduce(has_data_tensor, op=dist.ReduceOp.SUM)
-
-        # Stop as soon as any rank runs out — uneven load causes FSDP AllGather deadlock
-        if has_data_tensor.item() < world_size:
-            break
-
-        yield batch
-
-
 @torch.no_grad()
-def sliding_window_ppl(args, model, dataloader, rank, experiments=None):
+def eval_windows(args, model, dataloader, rank, experiments=None):
+    """Score tail-perplexity on pre-extracted fixed-length windows.
+
+    Every window is exactly window_size real tokens with no padding, so no
+    attention_mask or validity filtering is needed.
+    DistributedSampler + drop_last=True guarantees all ranks execute the same
+    number of forward passes — FSDP-safe by construction.
+    """
     device = torch.device(f"cuda:{rank}")
-    max_amount_of_windows = 10
     k_tail = 100
 
-    total_nll = torch.zeros(len(args.lengths), device=device, dtype=torch.float64)
-    total_tok = torch.zeros(len(args.lengths), device=device, dtype=torch.long)
+    total_nll = torch.zeros(1, device=device, dtype=torch.float64)
+    total_tok = torch.zeros(1, device=device, dtype=torch.long)
 
-    pbar = tqdm(synchronized_dataloader_iterator(dataloader, rank), desc="batches", disable=(rank != 0))
+    pbar = tqdm(dataloader, desc="windows", disable=(rank != 0))
     for batch in pbar:
-        batch_input_ids      = batch["input_ids"].to(device, non_blocking=True)       # [B, max_len]
-        batch_attention_mask = batch["attention_mask"].to(device, non_blocking=True)  # [B, max_len]
-        seq_len = batch_input_ids.size(1)  # always max_length — same on all ranks ✓
+        input_ids = batch["input_ids"].to(device)  # [B, L] — real tokens only ✓
+        B = input_ids.size(0)
 
-        for i, L in enumerate(args.lengths):
-            window_size = int(L)
-            if seq_len < window_size:
-                continue  # consistent across all ranks ✓
-            stride = max(10, (seq_len - window_size) // max_amount_of_windows)
-            # stride is deterministic from seq_len — same on all ranks ✓
+        # Every window in this batch is padding-free — inform recording layers
+        if experiments is not None:
+            experiments["valid_mask"] = [True] * B
 
-            for begin_loc in range(0, seq_len - window_size + 1, stride):
-                end_loc = begin_loc + window_size
-                input_ids      = batch_input_ids[:, begin_loc:end_loc]      # [B, W]
-                attention_mask = batch_attention_mask[:, begin_loc:end_loc]  # [B, W]
+        if "zamba2" in args.model.lower():
+            outputs = model(input_ids=input_ids, num_logits_to_keep=k_tail + 1)
+        elif any(k in args.model.lower() for k in ("bamba", "nemotron", "mamba")):
+            outputs = model(input_ids=input_ids, num_logits_to_keep=k_tail + 1, use_cache=False)
+        else:
+            inference_params = {
+                "max_seqlen": args.max_length + 1,
+                "max_batch_size": B,
+                "seqlen_offset": 0,
+                "batch_size_offset": 0,
+            }
+            outputs, _ = model(input_ids, num_last_tokens=k_tail + 1,
+                               inference_params=inference_params)
 
-                # A sample is valid only if the entire window contains no padding
-                valid_samples = attention_mask.all(dim=1)  # [B] bool
+        logits = outputs.logits
+        V = logits.size(-1)
+        T = min(logits.size(1), input_ids.size(1))
+        logits = logits[:, :T, :]
+        labels = input_ids[:, -T:]
 
-                # Tell model which samples are valid (for logit/state recording in Bamba layers)
-                if experiments is not None:
-                    experiments["valid_mask"] = valid_samples.cpu().tolist()
+        shift_logits = logits[:, :-1, :].contiguous().float()
+        shift_labels = labels[:, 1:].contiguous()
+        k_eff = min(k_tail, shift_labels.size(1))
+        if k_eff == 0:
+            continue
 
-                # Always call model — FSDP requires identical collectives on all ranks ✓
-                if "zamba2" in args.model.lower():
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask,
-                                    num_logits_to_keep=k_tail + 1)
-                elif any(k in args.model.lower() for k in ("bamba", "nemotron", "mamba")):
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask,
-                                    num_logits_to_keep=k_tail + 1, use_cache=False)
-                else:
-                    inference_params = {
-                        "max_seqlen": window_size + 1,
-                        "max_batch_size": input_ids.shape[0],
-                        "seqlen_offset": 0,
-                        "batch_size_offset": 0,
-                    }
-                    outputs, _ = model(input_ids, attention_mask=attention_mask,
-                                       num_last_tokens=k_tail + 1,
-                                       inference_params=inference_params)
-
-                # Discard results if no sample in the batch is fully padding-free
-                if not valid_samples.any():
-                    continue
-
-                logits = outputs.logits
-                V = logits.size(-1)
-                T = min(logits.size(1), input_ids.size(1))
-                logits = logits[:, :T, :]
-                labels = input_ids[:, -T:]
-
-                shift_logits = logits[:, :-1, :].contiguous().float()
-                shift_labels = labels[:, 1:].contiguous()
-                k_eff = min(k_tail, shift_labels.size(1))
-                if k_eff == 0:
-                    continue
-
-                # Accumulate only for valid (fully padding-free) samples
-                valid_logits = shift_logits[valid_samples, -k_eff:, :]  # [n_valid, k_eff, V]
-                valid_labels = shift_labels[valid_samples, -k_eff:]     # [n_valid, k_eff]
-
-                nll_sum = F.cross_entropy(
-                    valid_logits.reshape(-1, V),
-                    valid_labels.reshape(-1),
-                    reduction="sum",
-                )
-                total_nll[i] += nll_sum.double()
-                total_tok[i] += valid_samples.sum().item() * k_eff
+        nll_sum = F.cross_entropy(
+            shift_logits[:, -k_eff:, :].reshape(-1, V),
+            shift_labels[:, -k_eff:].reshape(-1),
+            reduction="sum",
+        )
+        total_nll[0] += nll_sum.double()
+        total_tok[0] += B * k_eff
 
     dist.all_reduce(total_nll, op=dist.ReduceOp.SUM)
     dist.all_reduce(total_tok, op=dist.ReduceOp.SUM)
-    return total_nll, total_tok
+    return total_nll[0], total_tok[0]
 
 
 def main():
     parser = argparse.ArgumentParser()
     # Model & precision
     parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--bf16", action="store_true", help="Use bfloat16 autocast (recommended on Ampere/ADA/Hopper).")
+    parser.add_argument("--bf16", action="store_true",
+                        help="Use bfloat16 (recommended on Ampere/ADA/Hopper).")
     # Dataset
-    parser.add_argument("--dataset", type=str, required=True, help='HF dataset id or local script, e.g. "pg19"')
+    parser.add_argument("--dataset", type=str, required=True,
+                        help='HF dataset id or local script, e.g. "emozilla/pg19"')
     parser.add_argument("--subset", type=str, default=None)
     parser.add_argument("--split", type=str, default="validation")
-    parser.add_argument("--sample-size", type=int, default=0, help="Number of data points sampled from the dataset.")
-    parser.add_argument("--feature", type=str, default="text", help="Text column name")
-    parser.add_argument("--streaming", action="store_true", help="Use HF streaming (recommended for large datasets).")
-    parser.add_argument("--shuffle-buffer", type=int, default=0, help="Streaming shuffle buffer size; 0 = no shuffle.")
-    parser.add_argument("--max-length", type=int, default=2048, help="Truncate each sample to this length.")
-    # Loader
+    parser.add_argument("--sample-size", type=int, default=0,
+                        help="Max documents to process (0 = all).")
+    parser.add_argument("--feature", type=str, default="text",
+                        help="Text column name in the dataset.")
+    parser.add_argument("--streaming", action="store_true",
+                        help="Use HF streaming mode.")
+    parser.add_argument("--shuffle-buffer", type=int, default=0,
+                        help="Streaming shuffle buffer size; 0 = no shuffle.")
+    # Window extraction
+    parser.add_argument("--max-length", type=int, default=2048,
+                        help="Window size in tokens. Every evaluated chunk is exactly this long.")
+    parser.add_argument("--stride", type=int, default=0,
+                        help="Stride between windows in tokens. "
+                             "0 = non-overlapping (stride == max-length).")
+    # DataLoader
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--num-proc", type=int, default=4, help="Tokenize map() workers (non-streaming mode).")
     parser.add_argument("--seed", type=int, default=42)
     # FSDP
-    parser.add_argument("--cpu-offload", action="store_true", help="FSDP CPU parameter offload (slower but lighter).")
+    parser.add_argument("--cpu-offload", action="store_true",
+                        help="FSDP CPU parameter offload (slower but lighter on GPU memory).")
 
     args = parser.parse_args()
+    if args.stride == 0:
+        args.stride = args.max_length  # non-overlapping by default
 
     # Distributed init
     rank = int(os.environ.get("RANK", 0))
@@ -303,22 +199,38 @@ def main():
     torch.cuda.set_device(rank)
     dist.init_process_group(backend="nccl", init_method="env://", rank=rank, world_size=world_size)
 
-    # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = getattr(tokenizer, "eos_token", tokenizer.unk_token)
-    tokenizer.padding_side = "right"
 
-    # lengths = [131072, 65536, 32768, 16384, 8192, 4096, 2048]
-    # args.lengths = [int(L) for L in lengths if int(L) <= args.max_length]
-    args.lengths = [args.max_length]
+    # Build the window dataset on every rank (same windows, DistributedSampler shards it).
+    # All windows are exactly max_length real tokens — no padding anywhere.
+    if rank == 0:
+        print(f"Extracting windows (size={args.max_length}, stride={args.stride}) ...")
+    window_dataset = build_window_dataset(args, tokenizer, args.max_length, args.stride)
+    if rank == 0:
+        print(f"  {len(window_dataset)} windows extracted.")
+    dist.barrier()
 
-    local_sample_size = args.sample_size // world_size + int(rank < args.sample_size % world_size)
+    # drop_last=True: truncate to a multiple of (world_size * batch_size) so every rank
+    # processes the same number of batches — FSDP AllGather deadlock cannot occur.
+    sampler = DistributedSampler(
+        window_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,
+        drop_last=True,
+    )
+    dataloader = DataLoader(
+        window_dataset,
+        batch_size=args.batch_size,
+        sampler=sampler,
+        num_workers=args.num_workers,
+        collate_fn=collate_windows,
+        pin_memory=True,
+        persistent_workers=False if args.num_workers == 0 else True,
+    )
 
-    # DataLoader (on-the-fly tokenization)
-    dataloader = build_dataloader(args, tokenizer, rank, world_size, local_sample_size)
-
-    # Model
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
@@ -332,23 +244,19 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs)
     model.eval()
-    # Some models keep large KV cache flags on; not needed for loss-only eval
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
 
-    # Grab the experiments dict before FSDP moves the module.
-    # self.experiments in each Bamba layer is a reference to this same dict,
-    # so mutations made between forward calls remain visible to all layers.
+    # Capture experiments dict before FSDP wrapping.
+    # Every Bamba/NemotronH/Mamba2 layer stores a reference to this same dict,
+    # so mutations made in eval_windows are immediately visible to all layers.
     experiments = getattr(model.config, "experiments", None)
 
-    # FSDP wrapping
-    # CHANGED: use infer_transformer_layer_types to make this robust
     layer_types = infer_transformer_layer_types(model) or set()
     auto_wrap_policy = functools.partial(
         transformer_auto_wrap_policy,
         transformer_layer_cls=layer_types,
     )
-
     fsdp_model = FSDP(
         model,
         device_id=torch.device(f"cuda:{rank}"),
@@ -359,18 +267,17 @@ def main():
     )
 
     try:
-        print("Starting evaluation...")
-        total_nll, total_tok = sliding_window_ppl(args, fsdp_model, dataloader, rank,
-                                                  experiments=experiments)
-
+        print(f"[rank {rank}] Starting evaluation ...")
+        total_nll, total_tok = eval_windows(args, fsdp_model, dataloader, rank,
+                                            experiments=experiments)
         if rank == 0:
-            print("[Perplexity]")
-            for i, L in enumerate(args.lengths):
-                if total_tok[i] == 0:
-                    print(f"{L}: N/A (no valid windows — all samples shorter than window size)")
-                else:
-                    ppl = torch.exp(total_nll[i] / total_tok[i].double()).item()
-                    print(f"{L}: {ppl:.2f}")
+            if total_tok == 0:
+                print("PPL: N/A (no windows scored — check window size vs dataset lengths)")
+            else:
+                ppl = torch.exp(total_nll / total_tok.double()).item()
+                n_windows = total_tok.item() // 100  # k_tail = 100 tokens per window
+                print(f"[Perplexity]  window={args.max_length}  stride={args.stride}  "
+                      f"ppl={ppl:.4f}  scored_windows={n_windows}")
     finally:
         dist.destroy_process_group()
 
