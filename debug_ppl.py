@@ -7,15 +7,16 @@ SAMPLE_PATH = "subseq_lambada.txt"
 
 def compute_ppl(model_name):
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16, device_map="auto")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(device)
     model.eval()
 
     with open(SAMPLE_PATH, 'r', encoding='utf-8') as f:
         text = f.read()
-    input_ids = tokenizer(text, return_tensors="pt").input_ids.to(model.device)
+    input_ids = tokenizer(text, return_tensors="pt").input_ids.to(device)
 
     max_amount_of_windows = 10
-    lengths = [100_000, 80_000, 60_000, 40_000, 20_000, 10_000, 2_000]
+    lengths = [10_000, 8_000, 2_000]
 
     ppls = []
     seq_len = input_ids.size(1)
