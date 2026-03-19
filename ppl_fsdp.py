@@ -1,6 +1,5 @@
 import os
 import argparse
-import functools
 from typing import List
 
 import torch
@@ -13,9 +12,7 @@ import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 import datasets
-from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import ShardingStrategy, CPUOffload
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+from torch.distributed._composable.fsdp import fully_shard, CPUOffloadPolicy
 
 
 def make_windows(tokens: List[int], window_size: int, stride: int) -> List[List[int]]:
@@ -50,10 +47,11 @@ def build_window_dataset(args, tokenizer, window_size: int, stride: int):
         )
 
     all_windows: List[List[int]] = []
-    n_docs = 0
+    processed_docs = 0
     for doc in raw:
-        if args.sample_size > 0 and n_docs >= args.sample_size:
+        if args.sample_size > 0 and processed_docs >= args.sample_size:
             break
+        processed_docs += 1
         tokens = tokenizer(
             doc[args.feature],
             add_special_tokens=False,
@@ -62,8 +60,6 @@ def build_window_dataset(args, tokenizer, window_size: int, stride: int):
         )["input_ids"]
         wins = make_windows(tokens, window_size, stride)
         all_windows.extend(wins)
-        if wins:
-            n_docs += 1
 
     if not all_windows:
         raise RuntimeError(
@@ -94,7 +90,7 @@ def infer_transformer_layer_types(model):
 
 
 @torch.no_grad()
-def eval_windows(args, model, dataloader, rank, experiments=None):
+def eval_windows(args, model, dataloader, device, rank, experiments=None):
     """Score tail-perplexity on pre-extracted fixed-length windows.
 
     Every window is exactly window_size real tokens with no padding, so no
@@ -102,7 +98,6 @@ def eval_windows(args, model, dataloader, rank, experiments=None):
     DistributedSampler + drop_last=True guarantees all ranks execute the same
     number of forward passes — FSDP-safe by construction.
     """
-    device = torch.device(f"cuda:{rank}")
     k_tail = 100
 
     total_nll = torch.zeros(1, device=device, dtype=torch.float64)
@@ -195,9 +190,12 @@ def main():
 
     # Distributed init
     rank = int(os.environ.get("RANK", 0))
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
     world_size = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count()))
-    torch.cuda.set_device(rank)
-    dist.init_process_group(backend="nccl", init_method="env://", rank=rank, world_size=world_size)
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl", init_method="env://", rank=rank,
+                            world_size=world_size, device_id=device)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -253,22 +251,21 @@ def main():
     experiments = getattr(model.config, "experiments", None)
 
     layer_types = infer_transformer_layer_types(model) or set()
-    auto_wrap_policy = functools.partial(
-        transformer_auto_wrap_policy,
-        transformer_layer_cls=layer_types,
-    )
-    fsdp_model = FSDP(
-        model,
-        device_id=torch.device(f"cuda:{rank}"),
-        sharding_strategy=ShardingStrategy.FULL_SHARD,
-        cpu_offload=CPUOffload(offload_params=True) if args.cpu_offload else None,
-        auto_wrap_policy=auto_wrap_policy,
-        limit_all_gathers=True,
-    )
+    fsdp_kwargs = {}
+    if args.cpu_offload:
+        fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
+
+    # FSDP2: shard leaf transformer layers first, then the root (bottom-up)
+    for module in model.modules():
+        if type(module) in layer_types:
+            fully_shard(module, **fsdp_kwargs)
+    fully_shard(model, **fsdp_kwargs)
+    model.to(device)  # each rank holds only 1/world_size of params after sharding
+    fsdp_model = model
 
     try:
         print(f"[rank {rank}] Starting evaluation ...")
-        total_nll, total_tok = eval_windows(args, fsdp_model, dataloader, rank,
+        total_nll, total_tok = eval_windows(args, fsdp_model, dataloader, device, rank,
                                             experiments=experiments)
         if rank == 0:
             if total_tok == 0:
