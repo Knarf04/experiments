@@ -244,7 +244,7 @@ if __name__ == "__main__":
                         help="Model name (appended to model-dir)")
     parser.add_argument('--tokenizer', type=str, required=True,
                         help="Tokenizer name or path")
-    parser.add_argument('--precision', type=str, default='fp32',
+    parser.add_argument('--precision', type=str, default='bf16',
                         choices=['fp32', 'bf16', 'fp16'])
 
     args = parser.parse_args()
