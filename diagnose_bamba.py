@@ -120,13 +120,21 @@ def main():
 
     def make_hook(layer_idx, layer_type):
         def hook_fn(module, input, output):
-            inp = input[0] if isinstance(input, tuple) else input
-            out = output[0] if isinstance(output, tuple) else output
-            block_data[layer_idx] = {
-                "type": layer_type,
-                "in_std": inp.float().std().item(),
-                "out_std": out.float().std().item(),
-            }
+            try:
+                inp = input[0] if isinstance(input, (tuple, list)) and len(input) > 0 else input
+                if isinstance(inp, (tuple, list)):
+                    inp = inp[0] if len(inp) > 0 else None
+                out = output[0] if isinstance(output, (tuple, list)) and len(output) > 0 else output
+                if isinstance(out, (tuple, list)):
+                    out = out[0] if len(out) > 0 else None
+                if inp is not None and out is not None and isinstance(inp, torch.Tensor) and isinstance(out, torch.Tensor):
+                    block_data[layer_idx] = {
+                        "type": layer_type,
+                        "in_std": inp.float().std().item(),
+                        "out_std": out.float().std().item(),
+                    }
+            except Exception:
+                pass
         return hook_fn
 
     hooks = []
