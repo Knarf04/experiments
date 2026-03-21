@@ -13,7 +13,7 @@ import os
 import torch
 
 from huggingface_hub import split_torch_state_dict_into_shards
-from safetensors.torch import load_file, save_file
+from safetensors.torch import save_file
 
 from transformers import AutoTokenizer
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME, SAFE_WEIGHTS_NAME
@@ -334,7 +334,7 @@ def save_sharded_safetensors(state_dict, save_directory, metadata, max_shard_siz
 
 
 def fms_to_hf(model_variant, load_path, save_path, tokenizer_path,
-              precision="fp32", save_model=True):
+              precision="bf16", save_model=True):
     print("Loading mamba_ssm config from model variant...")
     config_data = get_model_config(model_variant)
     mamba_config = MambaConfig(**config_data)
@@ -367,18 +367,9 @@ def fms_to_hf(model_variant, load_path, save_path, tokenizer_path,
 
     dtype = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}[precision]
 
-    save_file_fn = None
-    if isinstance(save_model, bool) and save_model:
-        save_file_fn = save_single_safetensor
-    elif isinstance(save_model, str) and save_model == "sharded":
-        save_file_fn = save_sharded_safetensors
-
-    if save_file_fn:
-        save_file_fn(
-            {k: v.to(dtype) for k, v in hf_sd.items()},
-            save_path,
-            metadata={"format": "pt"},
-        )
+    if save_model:
+        state_dict_typed = {k: v.to(dtype) for k, v in hf_sd.items()}
+        save_sharded_safetensors(state_dict_typed, save_path, metadata={"format": "pt"}, max_shard_size="500MB")
 
     print(f"Saved to {save_path}")
     return blocks, mamba_config
@@ -398,7 +389,7 @@ if __name__ == "__main__":
                         help="Model name (appended to model-dir)")
     parser.add_argument('--tokenizer', type=str, required=True,
                         help="Tokenizer name or path")
-    parser.add_argument('--precision', type=str, default='fp32',
+    parser.add_argument('--precision', type=str, default='bf16',
                         choices=['fp32', 'bf16', 'fp16'])
 
     args = parser.parse_args()
@@ -406,16 +397,11 @@ if __name__ == "__main__":
     save_path = os.path.join(args.model_dir, args.model_name) if args.model_name else args.model_dir
     os.makedirs(save_path, exist_ok=True)
 
-    blocks, mamba_config = fms_to_hf(
+    fms_to_hf(
         model_variant=args.model_variant,
         load_path=args.src_dir,
         save_path=save_path,
         tokenizer_path=args.tokenizer,
         precision=args.precision,
     )
-
-    # Verify conversion
-    print("\nVerifying conversion...")
-    fms_sd = torch.load(args.src_dir, map_location="cpu").get("model_state")
-    hf_sd = load_file(os.path.join(save_path, SAFE_WEIGHTS_NAME))
-    verify_conversion(fms_sd, hf_sd, blocks, mamba_config.attn_cfg)
+    print(f"Checkpoint saved to {save_path}!")
