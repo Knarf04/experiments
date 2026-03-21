@@ -26,12 +26,27 @@ def main():
 
     # 1. Read checkpoint values for dt_bias, A_log, D
     index_path = os.path.join(args.model, "model.safetensors.index.json")
-    with open(index_path) as f:
-        weight_map = json.load(f)["weight_map"]
+    single_path = os.path.join(args.model, "model.safetensors")
 
-    layers_to_check = [0, 1, 9, 18]  # mamba layers + first attention layer
-    params_to_check = ["mixer.mamba.dt_bias", "mixer.mamba.A_log", "mixer.mamba.D",
-                        "mamba.dt_bias", "mamba.A_log", "mamba.D"]
+    if os.path.exists(index_path):
+        with open(index_path) as f:
+            weight_map = json.load(f)["weight_map"]
+        def load_tensor(key):
+            shard = os.path.join(args.model, weight_map[key])
+            with safe_open(shard, framework="pt", device="cpu") as f:
+                return f.get_tensor(key)
+        all_keys = set(weight_map.keys())
+    elif os.path.exists(single_path):
+        _sf = safe_open(single_path, framework="pt", device="cpu")
+        all_keys = set(_sf.keys())
+        def load_tensor(key):
+            with safe_open(single_path, framework="pt", device="cpu") as f:
+                return f.get_tensor(key)
+    else:
+        raise FileNotFoundError("No safetensors checkpoint found")
+
+    layers_to_check = [0, 1, 9, 18]
+    params_to_check = ["mamba.dt_bias", "mamba.A_log", "mamba.D"]
 
     print(f"\n[1] Checkpoint values for dt_bias, A_log, D")
     ckpt_values = {}
@@ -39,10 +54,8 @@ def main():
         for param_suffix in params_to_check:
             for prefix in [f"model.layers.{layer_idx}.{param_suffix}",
                           f"backbone.layers.{layer_idx}.{param_suffix}"]:
-                if prefix in weight_map:
-                    shard = os.path.join(args.model, weight_map[prefix])
-                    with safe_open(shard, framework="pt", device="cpu") as f:
-                        tensor = f.get_tensor(prefix)
+                if prefix in all_keys:
+                    tensor = load_tensor(prefix)
                     ckpt_values[prefix] = tensor
                     print(f"  {prefix}: shape={tensor.shape}, mean={tensor.float().mean():.6f}, "
                           f"std={tensor.float().std():.6f}, first5={tensor.flatten()[:5].float().tolist()}")
