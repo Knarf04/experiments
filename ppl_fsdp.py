@@ -64,7 +64,7 @@ def build_window_dataset(args, tokenizer, window_size: int, stride: int):
     if not all_windows:
         raise RuntimeError(
             f"No windows produced. All documents may be shorter than "
-            f"window_size={window_size}. Check --max-length and --stride."
+            f"window_size={window_size}. Check --seq-len and --stride."
         )
 
     return datasets.Dataset.from_dict({"input_ids": all_windows})
@@ -90,7 +90,7 @@ def infer_transformer_layer_types(model):
 
 
 @torch.no_grad()
-def eval_windows(args, model, dataloader, device, rank, experiments=None):
+def eval_windows(args, model, dataloader, device, rank, window_size, experiments=None):
     """Score tail-perplexity on pre-extracted fixed-length windows.
 
     Every window is exactly window_size real tokens with no padding, so no
@@ -103,7 +103,7 @@ def eval_windows(args, model, dataloader, device, rank, experiments=None):
     total_nll = torch.zeros(1, device=device, dtype=torch.float64)
     total_tok = torch.zeros(1, device=device, dtype=torch.long)
 
-    pbar = tqdm(dataloader, desc="windows", disable=(rank != 0))
+    pbar = tqdm(dataloader, desc=f"windows (len={window_size})", disable=(rank != 0))
     for batch in pbar:
         input_ids = batch["input_ids"].to(device)  # [B, L] — real tokens only ✓
         B = input_ids.size(0)
@@ -118,7 +118,7 @@ def eval_windows(args, model, dataloader, device, rank, experiments=None):
             outputs = model(input_ids=input_ids, num_logits_to_keep=k_tail + 1, use_cache=False)
         else:
             inference_params = {
-                "max_seqlen": args.max_length + 1,
+                "max_seqlen": window_size + 1,
                 "max_batch_size": B,
                 "seqlen_offset": 0,
                 "batch_size_offset": 0,
@@ -171,8 +171,9 @@ def main():
     parser.add_argument("--shuffle-buffer", type=int, default=0,
                         help="Streaming shuffle buffer size; 0 = no shuffle.")
     # Window extraction
-    parser.add_argument("--max-length", type=int, default=2048,
-                        help="Window size in tokens. Every evaluated chunk is exactly this long.")
+    parser.add_argument("--seq-len", type=int, nargs="+", default=[2048],
+                        help="Window size(s) in tokens. Pass multiple values to sweep, "
+                             "e.g. --seq-len 2048 4096 8192.")
     parser.add_argument("--stride", type=int, default=0,
                         help="Stride between windows in tokens. "
                              "0 = non-overlapping (stride == max-length).")
@@ -185,8 +186,6 @@ def main():
                         help="FSDP CPU parameter offload (slower but lighter on GPU memory).")
 
     args = parser.parse_args()
-    if args.stride == 0:
-        args.stride = args.max_length  # non-overlapping by default
 
     # Distributed init
     rank = int(os.environ.get("RANK", 0))
@@ -200,34 +199,6 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = getattr(tokenizer, "eos_token", tokenizer.unk_token)
-
-    # Build the window dataset on every rank (same windows, DistributedSampler shards it).
-    # All windows are exactly max_length real tokens — no padding anywhere.
-    if rank == 0:
-        print(f"Extracting windows (size={args.max_length}, stride={args.stride}) ...")
-    window_dataset = build_window_dataset(args, tokenizer, args.max_length, args.stride)
-    if rank == 0:
-        print(f"  {len(window_dataset)} windows extracted.")
-    dist.barrier()
-
-    # drop_last=True: truncate to a multiple of (world_size * batch_size) so every rank
-    # processes the same number of batches — FSDP AllGather deadlock cannot occur.
-    sampler = DistributedSampler(
-        window_dataset,
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=False,
-        drop_last=True,
-    )
-    dataloader = DataLoader(
-        window_dataset,
-        batch_size=args.batch_size,
-        sampler=sampler,
-        num_workers=args.num_workers,
-        collate_fn=collate_windows,
-        pin_memory=True,
-        persistent_workers=False if args.num_workers == 0 else True,
-    )
 
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
@@ -263,18 +234,68 @@ def main():
         model.to(device)  # each rank holds only 1/world_size of params after sharding
     fsdp_model = model
 
+    # Iterate over each requested sequence length
+    results = []  # list of (window_size, stride, ppl, n_windows)
+
     try:
-        print(f"[rank {rank}] Starting evaluation ...")
-        total_nll, total_tok = eval_windows(args, fsdp_model, dataloader, device, rank,
-                                            experiments=experiments)
-        if rank == 0:
-            if total_tok == 0:
-                print("PPL: N/A (no windows scored — check window size vs dataset lengths)")
-            else:
-                ppl = torch.exp(total_nll / total_tok.double()).item()
-                n_windows = total_tok.item() // 100  # k_tail = 100 tokens per window
-                print(f"[Perplexity]  window={args.max_length}  stride={args.stride}  "
-                      f"ppl={ppl:.4f}  scored_windows={n_windows}")
+        for window_size in sorted(args.seq_len):
+            stride = window_size if args.stride == 0 else args.stride
+
+            if rank == 0:
+                print(f"\n{'='*60}")
+                print(f"Extracting windows (size={window_size}, stride={stride}) ...")
+            window_dataset = build_window_dataset(args, tokenizer, window_size, stride)
+            if rank == 0:
+                print(f"  {len(window_dataset)} windows extracted.")
+            dist.barrier()
+
+            # drop_last=True: truncate to a multiple of (world_size * batch_size) so every rank
+            # processes the same number of batches — FSDP AllGather deadlock cannot occur.
+            sampler = DistributedSampler(
+                window_dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=False,
+                drop_last=True,
+            )
+            dataloader = DataLoader(
+                window_dataset,
+                batch_size=args.batch_size,
+                sampler=sampler,
+                num_workers=args.num_workers,
+                collate_fn=collate_windows,
+                pin_memory=True,
+                persistent_workers=False if args.num_workers == 0 else True,
+            )
+
+            if rank == 0:
+                print(f"[rank {rank}] Evaluating window_size={window_size} ...")
+            total_nll, total_tok = eval_windows(args, fsdp_model, dataloader, device, rank,
+                                                window_size=window_size, experiments=experiments)
+
+            if rank == 0:
+                if total_tok == 0:
+                    print(f"  window={window_size}: N/A (no windows scored)")
+                    results.append((window_size, stride, None, 0))
+                else:
+                    ppl = torch.exp(total_nll / total_tok.double()).item()
+                    n_windows = total_tok.item() // 100  # k_tail = 100 tokens per window
+                    print(f"  [Perplexity]  window={window_size}  stride={stride}  "
+                          f"ppl={ppl:.4f}  scored_windows={n_windows}")
+                    results.append((window_size, stride, ppl, n_windows))
+
+        # Print summary table
+        if rank == 0 and len(results) > 1:
+            print(f"\n{'='*60}")
+            print(f"  PPL Summary: {args.model}")
+            print(f"{'='*60}")
+            print(f"  {'Window':>8}  {'Stride':>8}  {'PPL':>10}  {'Windows':>8}")
+            print(f"  {'-'*8}  {'-'*8}  {'-'*10}  {'-'*8}")
+            for window_size, stride, ppl, n_windows in results:
+                ppl_str = f"{ppl:.4f}" if ppl is not None else "N/A"
+                print(f"  {window_size:>8}  {stride:>8}  {ppl_str:>10}  {n_windows:>8}")
+            print(f"{'='*60}")
+
     finally:
         dist.destroy_process_group()
 

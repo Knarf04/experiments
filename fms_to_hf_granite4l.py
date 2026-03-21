@@ -382,6 +382,7 @@ def fms_to_hf(model_variant, load_path, save_path, tokenizer_path,
 
 
 if __name__ == "__main__":
+    print("[WARNING] DEPERACATED: In our actual setting, G4L is converted into Bamba checkpoints with NoPE.")
     parser = argparse.ArgumentParser(
         description="Convert mamba_ssm checkpoint to GraniteMoeHybrid HuggingFace format"
     )
