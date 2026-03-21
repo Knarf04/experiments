@@ -112,9 +112,12 @@ def eval_windows(args, model, dataloader, device, rank, window_size, experiments
         if experiments is not None:
             experiments["valid_mask"] = [True] * B
 
-        if "zamba2" in args.model.lower():
+        model_type = getattr(model.config, "model_type", "").lower()
+        model_id = args.model.lower()
+        if "zamba2" in model_type or "zamba2" in model_id:
             outputs = model(input_ids=input_ids, num_logits_to_keep=k_tail + 1)
-        elif any(k in args.model.lower() for k in ("bamba", "nemotron", "mamba")):
+        elif any(k in model_type for k in ("bamba", "nemotron", "mamba")) or \
+             any(k in model_id for k in ("bamba", "nemotron", "mamba")):
             outputs = model(input_ids=input_ids, num_logits_to_keep=k_tail + 1, use_cache=False)
         else:
             inference_params = {
