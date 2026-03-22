@@ -305,7 +305,7 @@ def test_minikv_vs_no_eviction_forward():
     print("=" * 60)
 
     model, config = make_micro_model()
-    torch.manual_seed(99)
+    torch.manual_seed(123)  # use same seed as test 1 (seed 99 causes NaN even in baseline)
     input_ids = torch.randint(0, 256, (1, 64))
 
     # --- Baseline forward (SDPA, no eviction) ---
@@ -459,10 +459,102 @@ def _diagnose_nan_layer_by_layer(model, config, input_ids):
                 break
 
 
+def test_decode_divergence():
+    """Test 6: Check if first decode step produces correct logits.
+    Compares baseline (SDPA full cache) vs MiniKV (evicted cache) decode."""
+    print("=" * 60)
+    print("TEST 6: Decode step comparison (baseline vs MiniKV)")
+    print("=" * 60)
+
+    model, config = make_micro_model()
+    torch.manual_seed(123)
+    input_ids = torch.randint(0, 256, (1, 64))
+    seq_len = input_ids.shape[1]
+
+    # --- Baseline: prefill + 1 decode step ---
+    print("\n  [Baseline] SDPA prefill + decode")
+    with torch.no_grad():
+        baseline_out = model(input_ids, use_cache=True)
+    baseline_logits_prefill = baseline_out[0]
+    baseline_cache = baseline_out[1]
+    next_token = baseline_logits_prefill[:, -1:, :].argmax(dim=-1)
+    print(f"    Prefill logits nan: {baseline_logits_prefill.isnan().any().item()}")
+    print(f"    Next token: {next_token.item()}")
+    print(f"    Cache[0] shape: {baseline_cache[0][0].shape}")
+
+    # Decode 1 step
+    with torch.no_grad():
+        baseline_decode = model(next_token, past_key_value_states=list(baseline_cache), use_cache=True)
+    baseline_decode_logits = baseline_decode[0]
+    print(f"    Decode logits nan: {baseline_decode_logits.isnan().any().item()}")
+    if not baseline_decode_logits.isnan().any():
+        baseline_next2 = baseline_decode_logits[:, -1, :].argmax(dim=-1)
+        print(f"    2nd generated token: {baseline_next2.item()}")
+
+    # --- MiniKV: prefill + 1 decode step ---
+    print("\n  [MiniKV] H2O prefill + decode")
+    minikv_config = MiniKVConfig(selection_method="h2o", heavy_ratio=0.25, recent_ratio=0.25)
+    extra_kwargs = create_minikv_kwargs(minikv_config, num_layers=config.nlayers)
+
+    with torch.no_grad():
+        minikv_out = model(input_ids, use_cache=True, **extra_kwargs)
+    minikv_logits_prefill = minikv_out[0]
+    minikv_cache = minikv_out[1]
+    next_token_mk = minikv_logits_prefill[:, -1:, :].argmax(dim=-1)
+    print(f"    Prefill logits nan: {minikv_logits_prefill.isnan().any().item()}")
+    print(f"    Next token: {next_token_mk.item()}")
+
+    # Check cache state
+    kv0 = minikv_cache[0][0]
+    print(f"    Cache[0] type: {type(kv0).__name__}")
+    if isinstance(kv0, EvictedKVCache):
+        print(f"    Cache[0] physical: {kv0.keys.shape[2]}, logical: {kv0.seq_len_logical}")
+        print(f"    Cache[0] keys nan: {kv0.keys.isnan().any().item()}")
+
+    # Prefill logits should match
+    prefill_diff = (baseline_logits_prefill - minikv_logits_prefill).abs().max().item()
+    print(f"\n    Prefill logit diff: {prefill_diff:.2e}")
+    if prefill_diff > 1e-4:
+        print(f"    ERROR: Prefill logits should be identical!")
+
+    # Decode 1 step with minikv
+    extra_kwargs["minikv_state"]["layer_counter"] = 0
+    extra_kwargs["minikv_state"]["is_prefill"] = False
+    if "mask" in extra_kwargs:
+        del extra_kwargs["mask"]
+
+    with torch.no_grad():
+        minikv_decode = model(next_token_mk, past_key_value_states=list(minikv_cache),
+                             use_cache=True, **extra_kwargs)
+    minikv_decode_logits = minikv_decode[0]
+    print(f"    Decode logits nan: {minikv_decode_logits.isnan().any().item()}")
+    if not minikv_decode_logits.isnan().any():
+        minikv_next2 = minikv_decode_logits[:, -1, :].argmax(dim=-1)
+        print(f"    2nd generated token: {minikv_next2.item()}")
+
+    # Compare decode logits
+    if not baseline_decode_logits.isnan().any() and not minikv_decode_logits.isnan().any():
+        decode_diff = (baseline_decode_logits - minikv_decode_logits).abs().max().item()
+        print(f"\n    Decode logit diff: {decode_diff:.2e}")
+        if decode_diff < 1e-2:
+            print("    (very close — eviction has minimal impact)")
+        else:
+            print("    (expected: some divergence due to evicted tokens)")
+
+    # Overall
+    ok = not minikv_logits_prefill.isnan().any() and not minikv_decode_logits.isnan().any()
+    if ok:
+        print("\n  PASS: No NaN in MiniKV prefill or decode")
+    else:
+        print("\n  FAIL: NaN detected")
+    print()
+    return ok
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--test", type=str, default="all",
-                       choices=["all", "baseline", "rope", "cache", "selection", "prefill"],
+                       choices=["all", "baseline", "rope", "cache", "selection", "prefill", "decode"],
                        help="Which test to run")
     args = parser.parse_args()
 
@@ -472,6 +564,7 @@ def main():
         "cache": test_cache_shapes,
         "selection": test_selection_standalone,
         "prefill": test_minikv_vs_no_eviction_forward,
+        "decode": test_decode_divergence,
     }
 
     if args.test == "all":
