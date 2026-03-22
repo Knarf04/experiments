@@ -55,43 +55,51 @@ def test_baseline_vs_minikv():
     print("TEST 1: Baseline vs MiniKV comparison")
     print("=" * 60)
 
-    model, config = make_micro_model()
+    # --- Baseline model (no eviction) ---
+    model_baseline, config = make_micro_model()
     torch.manual_seed(123)
     input_ids = torch.randint(0, 256, (1, 64))
 
-    # --- Baseline (standard SDPA, no eviction) ---
     print("\n[Baseline] Running generate with standard SDPA...")
     baseline_result = generate(
-        model, input_ids, max_new_tokens=10, use_cache=True, do_sample=False,
+        model_baseline, input_ids, max_new_tokens=10, use_cache=True, do_sample=False,
     )
     print(f"  Input shape:  {input_ids.shape}")
     print(f"  Output shape: {baseline_result.shape}")
     print(f"  Generated tokens: {baseline_result[0, 64:].tolist()}")
 
-    # --- MiniKV with very conservative eviction (keep 90%) ---
-    print("\n[MiniKV 90%] Running generate with H2O (heavy=0.45, recent=0.45)...")
-    minikv_config = MiniKVConfig(
-        selection_method="h2o", heavy_ratio=0.45, recent_ratio=0.45,
+    # --- MiniKV 90% via config (auto-injected, no extra_kwargs needed) ---
+    print("\n[MiniKV 90%] Config-based auto-injection (no extra_kwargs)...")
+    config_90 = LLaMAConfig(
+        src_vocab_size=256, emb_dim=64, nheads=4, kvheads=2, nlayers=4,
+        hidden_grow_factor=2.0, multiple_of=2, max_expected_seq_len=512,
+        kv_eviction="h2o", kv_eviction_heavy_ratio=0.45, kv_eviction_recent_ratio=0.45,
     )
-    extra_kwargs = create_minikv_kwargs(minikv_config, num_layers=config.nlayers)
+    torch.manual_seed(42)
+    model_90 = LLaMA(config_90)
+    model_90.reset_parameters()
+    model_90.eval()
     minikv_result_90 = generate(
-        model, input_ids, max_new_tokens=10, use_cache=True, do_sample=False,
-        extra_kwargs=extra_kwargs,
+        model_90, input_ids, max_new_tokens=10, use_cache=True, do_sample=False,
     )
     print(f"  Output shape: {minikv_result_90.shape}")
     print(f"  Generated tokens: {minikv_result_90[0, 64:].tolist()}")
     match_90 = torch.equal(baseline_result, minikv_result_90)
     print(f"  Matches baseline: {match_90}")
 
-    # --- MiniKV with moderate eviction (keep 50%) ---
-    print("\n[MiniKV 50%] Running generate with H2O (heavy=0.25, recent=0.25)...")
-    minikv_config = MiniKVConfig(
-        selection_method="h2o", heavy_ratio=0.25, recent_ratio=0.25,
+    # --- MiniKV 50% via config ---
+    print("\n[MiniKV 50%] Config-based auto-injection...")
+    config_50 = LLaMAConfig(
+        src_vocab_size=256, emb_dim=64, nheads=4, kvheads=2, nlayers=4,
+        hidden_grow_factor=2.0, multiple_of=2, max_expected_seq_len=512,
+        kv_eviction="h2o", kv_eviction_heavy_ratio=0.25, kv_eviction_recent_ratio=0.25,
     )
-    extra_kwargs = create_minikv_kwargs(minikv_config, num_layers=config.nlayers)
+    torch.manual_seed(42)
+    model_50 = LLaMA(config_50)
+    model_50.reset_parameters()
+    model_50.eval()
     minikv_result_50 = generate(
-        model, input_ids, max_new_tokens=10, use_cache=True, do_sample=False,
-        extra_kwargs=extra_kwargs,
+        model_50, input_ids, max_new_tokens=10, use_cache=True, do_sample=False,
     )
     print(f"  Output shape: {minikv_result_50.shape}")
     print(f"  Generated tokens: {minikv_result_50[0, 64:].tolist()}")
