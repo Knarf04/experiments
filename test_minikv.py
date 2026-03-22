@@ -298,41 +298,165 @@ def test_selection_standalone():
 
 def test_minikv_vs_no_eviction_forward():
     """Test 5: Compare single forward pass (prefill only, no decode) to verify
-    that prefill attention output is identical with and without eviction."""
+    that prefill attention output is identical with and without eviction.
+    Includes detailed NaN diagnostics."""
     print("=" * 60)
-    print("TEST 5: Prefill output identity check")
+    print("TEST 5: Prefill output identity check + NaN diagnostics")
     print("=" * 60)
-    print("  (MiniKV prefill uses full attention for output, eviction only affects cache)")
 
     model, config = make_micro_model()
     torch.manual_seed(99)
     input_ids = torch.randint(0, 256, (1, 64))
 
-    # Baseline forward
+    # --- Baseline forward (SDPA, no eviction) ---
+    print("\n  [Baseline] use_cache=False, standard SDPA")
     with torch.no_grad():
         baseline_logits = model(input_ids, use_cache=False)
+    print(f"    logits shape: {baseline_logits.shape}")
+    print(f"    has NaN: {baseline_logits.isnan().any().item()}")
+    print(f"    has Inf: {baseline_logits.isinf().any().item()}")
+    print(f"    min/max: {baseline_logits.min().item():.4f} / {baseline_logits.max().item():.4f}")
 
-    # MiniKV forward (prefill)
+    # --- Baseline with use_cache=True (SDPA + cache) ---
+    print("\n  [Baseline+cache] use_cache=True, standard SDPA")
+    with torch.no_grad():
+        baseline_cached = model(input_ids, use_cache=True)
+    baseline_cached_logits = baseline_cached[0]
+    print(f"    logits shape: {baseline_cached_logits.shape}")
+    print(f"    has NaN: {baseline_cached_logits.isnan().any().item()}")
+    diff_cache = (baseline_logits - baseline_cached_logits).abs().max().item()
+    print(f"    diff vs no-cache baseline: {diff_cache:.2e}")
+
+    # --- MiniKV forward (prefill) ---
+    print("\n  [MiniKV] use_cache=True, minikv attention op")
     minikv_config = MiniKVConfig(selection_method="h2o", heavy_ratio=0.25, recent_ratio=0.25)
     extra_kwargs = create_minikv_kwargs(minikv_config, num_layers=config.nlayers)
 
     with torch.no_grad():
         minikv_output = model(input_ids, use_cache=True, **extra_kwargs)
     minikv_logits = minikv_output[0]
+    minikv_cache = minikv_output[1]
+    print(f"    logits shape: {minikv_logits.shape}")
+    print(f"    has NaN: {minikv_logits.isnan().any().item()}")
+    print(f"    has Inf: {minikv_logits.isinf().any().item()}")
+    if not minikv_logits.isnan().any():
+        print(f"    min/max: {minikv_logits.min().item():.4f} / {minikv_logits.max().item():.4f}")
 
-    # Prefill logits should be IDENTICAL (eviction doesn't affect prefill output)
+    # --- If NaN, do layer-by-layer diagnosis ---
+    if minikv_logits.isnan().any():
+        print("\n  === NaN DETECTED — running layer-by-layer diagnosis ===")
+        _diagnose_nan_layer_by_layer(model, config, input_ids)
+
+    # --- Compare ---
     max_diff = (baseline_logits - minikv_logits).abs().max().item()
     print(f"\n  Max logit difference (prefill): {max_diff:.2e}")
 
     if max_diff < 1e-4:
-        print("  PASS: Prefill logits match (eviction doesn't affect prefill output)")
+        print("  PASS: Prefill logits match")
         ok = True
+    elif not torch.isnan(torch.tensor(max_diff)):
+        print(f"  FAIL: Prefill logits differ by {max_diff:.2e}")
+        ok = False
     else:
-        print("  FAIL: Prefill logits differ — something is wrong with the prefill path")
+        print("  FAIL: NaN in logits — see diagnosis above")
         ok = False
 
     print()
     return ok
+
+
+def _diagnose_nan_layer_by_layer(model, config, input_ids):
+    """Run the MiniKV prefill path manually, checking for NaN after each step."""
+    import fms.utils.minikv.attention_op as minikv_ops
+
+    # Monkey-patch compute_prefill to add NaN checks
+    original_compute = minikv_ops._minikv_compute_prefill_op
+
+    def instrumented_compute(query, key_cache, value_cache, nheads, kvheads,
+                             p_dropout, scale_factor, **attn_kwargs):
+        import math
+
+        state = attn_kwargs["minikv_state"]
+        layer_idx = state["layer_counter"] - 1
+
+        queries = query.transpose(2, 1)
+        keys = key_cache
+        values = value_cache
+
+        print(f"\n    Layer {layer_idx} compute_prefill:")
+        print(f"      query:     shape={list(query.shape)}, nan={query.isnan().any().item()}")
+        print(f"      key_cache: shape={list(key_cache.shape)}, nan={key_cache.isnan().any().item()}")
+        print(f"      val_cache: shape={list(value_cache.shape)}, nan={value_cache.isnan().any().item()}")
+
+        expansion = nheads // kvheads
+        if expansion != 1:
+            keys_e = keys.unsqueeze(2).expand(-1, -1, expansion, -1, -1).flatten(1, 2)
+            values_e = values.unsqueeze(2).expand(-1, -1, expansion, -1, -1).flatten(1, 2)
+        else:
+            keys_e, values_e = keys, values
+
+        B, H, S, D = queries.shape
+
+        # Step 1: QK^T
+        attn_weights = torch.matmul(queries, keys_e.transpose(2, 3))
+        if scale_factor is not None:
+            attn_weights = attn_weights * scale_factor
+        else:
+            attn_weights = attn_weights / math.sqrt(D)
+        print(f"      after QK^T:  nan={attn_weights.isnan().any().item()}, "
+              f"min={attn_weights.min().item():.4f}, max={attn_weights.max().item():.4f}")
+
+        # Step 2: causal mask
+        causal_mask = torch.full((S, S), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
+        mask_cond = torch.arange(S, device=attn_weights.device)
+        causal_mask.masked_fill_(mask_cond < (mask_cond + 1).view(S, 1), 0)
+        attn_weights = attn_weights + causal_mask[None, None, :, :]
+        print(f"      after mask:  nan={attn_weights.isnan().any().item()}, "
+              f"min={attn_weights.min().item():.4f}, max={attn_weights.max().item():.4f}")
+
+        # Step 3: softmax
+        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(queries.dtype)
+        print(f"      after softmax: nan={attn_weights.isnan().any().item()}, "
+              f"min={attn_weights.min().item():.6f}, max={attn_weights.max().item():.6f}")
+
+        # Step 4: attention output
+        attn_output = torch.matmul(attn_weights, values_e)
+        print(f"      attn_output: nan={attn_output.isnan().any().item()}, "
+              f"min={attn_output.min().item():.4f}, max={attn_output.max().item():.4f}")
+
+        # Call original for the eviction part
+        return attn_output.transpose(2, 1).contiguous()
+
+    # Temporarily replace
+    # We can't easily replace just the compute part, so let's just run forward
+    # and check the output layer by layer
+    print("\n    Running model._helper layer by layer:")
+
+    minikv_config = MiniKVConfig(selection_method="h2o", heavy_ratio=0.25, recent_ratio=0.25)
+    extra_kwargs = create_minikv_kwargs(minikv_config, num_layers=config.nlayers)
+
+    with torch.no_grad():
+        x = model.shared(input_ids)
+        print(f"    After embedding: nan={x.isnan().any().item()}, shape={list(x.shape)}")
+
+        past_key_value_states = [None] * len(model.layers)
+        for i, layer in enumerate(model.layers):
+            output = layer(
+                x=x, position_ids=None,
+                past_key_value_state=past_key_value_states[i],
+                use_cache=True, **extra_kwargs,
+            )
+            x, cache = output
+            print(f"    After layer {i}: nan={x.isnan().any().item()}, "
+                  f"min={x.min().item():.4f}, max={x.max().item():.4f}")
+            if x.isnan().any():
+                print(f"      >>> NaN first appears at layer {i}!")
+                # Check the cache too
+                kv = cache[0]
+                if isinstance(kv, EvictedKVCache) and kv.keys is not None:
+                    print(f"      cache keys nan: {kv.keys.isnan().any().item()}")
+                    print(f"      cache vals nan: {kv.values.isnan().any().item()}")
+                break
 
 
 def main():
