@@ -366,97 +366,128 @@ def test_minikv_vs_no_eviction_forward():
 
 
 def _diagnose_nan_layer_by_layer(model, config, input_ids):
-    """Run the MiniKV prefill path manually, checking for NaN after each step."""
-    import fms.utils.minikv.attention_op as minikv_ops
-
-    # Monkey-patch compute_prefill to add NaN checks
-    original_compute = minikv_ops._minikv_compute_prefill_op
-
-    def instrumented_compute(query, key_cache, value_cache, nheads, kvheads,
-                             p_dropout, scale_factor, **attn_kwargs):
-        import math
-
-        state = attn_kwargs["minikv_state"]
-        layer_idx = state["layer_counter"] - 1
-
-        queries = query.transpose(2, 1)
-        keys = key_cache
-        values = value_cache
-
-        print(f"\n    Layer {layer_idx} compute_prefill:")
-        print(f"      query:     shape={list(query.shape)}, nan={query.isnan().any().item()}")
-        print(f"      key_cache: shape={list(key_cache.shape)}, nan={key_cache.isnan().any().item()}")
-        print(f"      val_cache: shape={list(value_cache.shape)}, nan={value_cache.isnan().any().item()}")
-
-        expansion = nheads // kvheads
-        if expansion != 1:
-            keys_e = keys.unsqueeze(2).expand(-1, -1, expansion, -1, -1).flatten(1, 2)
-            values_e = values.unsqueeze(2).expand(-1, -1, expansion, -1, -1).flatten(1, 2)
-        else:
-            keys_e, values_e = keys, values
-
-        B, H, S, D = queries.shape
-
-        # Step 1: QK^T
-        attn_weights = torch.matmul(queries, keys_e.transpose(2, 3))
-        if scale_factor is not None:
-            attn_weights = attn_weights * scale_factor
-        else:
-            attn_weights = attn_weights / math.sqrt(D)
-        print(f"      after QK^T:  nan={attn_weights.isnan().any().item()}, "
-              f"min={attn_weights.min().item():.4f}, max={attn_weights.max().item():.4f}")
-
-        # Step 2: causal mask
-        causal_mask = torch.full((S, S), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
-        mask_cond = torch.arange(S, device=attn_weights.device)
-        causal_mask.masked_fill_(mask_cond < (mask_cond + 1).view(S, 1), 0)
-        attn_weights = attn_weights + causal_mask[None, None, :, :]
-        print(f"      after mask:  nan={attn_weights.isnan().any().item()}, "
-              f"min={attn_weights.min().item():.4f}, max={attn_weights.max().item():.4f}")
-
-        # Step 3: softmax
-        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(queries.dtype)
-        print(f"      after softmax: nan={attn_weights.isnan().any().item()}, "
-              f"min={attn_weights.min().item():.6f}, max={attn_weights.max().item():.6f}")
-
-        # Step 4: attention output
-        attn_output = torch.matmul(attn_weights, values_e)
-        print(f"      attn_output: nan={attn_output.isnan().any().item()}, "
-              f"min={attn_output.min().item():.4f}, max={attn_output.max().item():.4f}")
-
-        # Call original for the eviction part
-        return attn_output.transpose(2, 1).contiguous()
-
-    # Temporarily replace
-    # We can't easily replace just the compute part, so let's just run forward
-    # and check the output layer by layer
-    print("\n    Running model._helper layer by layer:")
-
-    minikv_config = MiniKVConfig(selection_method="h2o", heavy_ratio=0.25, recent_ratio=0.25)
-    extra_kwargs = create_minikv_kwargs(minikv_config, num_layers=config.nlayers)
+    """Trace through layer 0 sub-operations to find exact NaN source."""
+    print("\n    === DETAILED LAYER 0 DIAGNOSIS ===")
 
     with torch.no_grad():
         x = model.shared(input_ids)
-        print(f"    After embedding: nan={x.isnan().any().item()}, shape={list(x.shape)}")
+        print(f"\n    embedding: nan={x.isnan().any().item()}, shape={list(x.shape)}")
 
-        past_key_value_states = [None] * len(model.layers)
-        for i, layer in enumerate(model.layers):
-            output = layer(
-                x=x, position_ids=None,
-                past_key_value_state=past_key_value_states[i],
-                use_cache=True, **extra_kwargs,
+        layer = model.layers[0]
+
+        # Step 1: LayerNorm
+        residual = x
+        x_ln = layer.ln(x)
+        print(f"    ln(x):     nan={x_ln.isnan().any().item()}, "
+              f"min={x_ln.min().item():.6f}, max={x_ln.max().item():.6f}")
+
+        # Step 2: QKV projection
+        attn = layer.attn
+        q_out, k_out, v_out = attn.in_proj(x_ln, None, None)
+        print(f"    q_proj:    nan={q_out.isnan().any().item()}, "
+              f"min={q_out.min().item():.6f}, max={q_out.max().item():.6f}")
+        print(f"    k_proj:    nan={k_out.isnan().any().item()}, "
+              f"min={k_out.min().item():.6f}, max={k_out.max().item():.6f}")
+        print(f"    v_proj:    nan={v_out.isnan().any().item()}, "
+              f"min={v_out.min().item():.6f}, max={v_out.max().item():.6f}")
+
+        B, S, _ = x_ln.shape
+        queries = q_out.view(B, S, attn.nheads, attn.emb_kq_per_head)
+        keys = k_out.view(B, S, attn.kvheads, attn.emb_kq_per_head)
+        values = v_out.view(B, S, attn.kvheads, attn.emb_v_per_head)
+        print(f"    reshape:   q={list(queries.shape)}, k={list(keys.shape)}, v={list(values.shape)}")
+
+        # Step 3: RoPE
+        if attn.position_encoder is not None:
+            queries_r, keys_r = attn.position_encoder.adjusted_qk(
+                queries, keys, None, None, False
             )
-            x, cache = output
-            print(f"    After layer {i}: nan={x.isnan().any().item()}, "
-                  f"min={x.min().item():.4f}, max={x.max().item():.4f}")
-            if x.isnan().any():
-                print(f"      >>> NaN first appears at layer {i}!")
-                # Check the cache too
-                kv = cache[0]
-                if isinstance(kv, EvictedKVCache) and kv.keys is not None:
-                    print(f"      cache keys nan: {kv.keys.isnan().any().item()}")
-                    print(f"      cache vals nan: {kv.values.isnan().any().item()}")
-                break
+            print(f"    rope(q):   nan={queries_r.isnan().any().item()}, "
+                  f"min={queries_r.min().item():.6f}, max={queries_r.max().item():.6f}")
+            print(f"    rope(k):   nan={keys_r.isnan().any().item()}, "
+                  f"min={keys_r.min().item():.6f}, max={keys_r.max().item():.6f}")
+        else:
+            queries_r, keys_r = queries, keys
+            print(f"    no RoPE")
+
+        # Step 4: Transpose (what store_op does)
+        keys_t = keys_r.transpose(2, 1)   # (B, kvheads, S, D)
+        values_t = values.transpose(2, 1)
+
+        # Step 5: GQA expand
+        expansion = attn.nheads // attn.kvheads
+        if expansion != 1:
+            keys_e = keys_t.unsqueeze(2).expand(-1, -1, expansion, -1, -1).flatten(1, 2)
+            values_e = values_t.unsqueeze(2).expand(-1, -1, expansion, -1, -1).flatten(1, 2)
+        else:
+            keys_e, values_e = keys_t, values_t
+        print(f"    expand:    keys_e={list(keys_e.shape)}, values_e={list(values_e.shape)}")
+
+        # Step 6: QK^T
+        queries_t = queries_r.transpose(2, 1)  # (B, nheads, S, D)
+        D = queries_t.shape[-1]
+        import math
+        attn_weights = torch.matmul(queries_t, keys_e.transpose(2, 3)) / math.sqrt(D)
+        print(f"    QK^T/sqrt: nan={attn_weights.isnan().any().item()}, "
+              f"min={attn_weights.min().item():.6f}, max={attn_weights.max().item():.6f}, "
+              f"shape={list(attn_weights.shape)}")
+
+        # Step 7: Causal mask
+        causal_mask = torch.full((S, S), torch.finfo(attn_weights.dtype).min, device=attn_weights.device)
+        mask_cond = torch.arange(S, device=attn_weights.device)
+        causal_mask.masked_fill_(mask_cond < (mask_cond + 1).view(S, 1), 0)
+        attn_weights_masked = attn_weights + causal_mask[None, None, :, :]
+        print(f"    +mask:     nan={attn_weights_masked.isnan().any().item()}, "
+              f"min={attn_weights_masked.min().item():.6f}, max={attn_weights_masked.max().item():.6f}")
+
+        # Step 8: Softmax
+        attn_probs = nn.functional.softmax(attn_weights_masked, dim=-1, dtype=torch.float32).to(queries_t.dtype)
+        print(f"    softmax:   nan={attn_probs.isnan().any().item()}, "
+              f"min={attn_probs.min().item():.6f}, max={attn_probs.max().item():.6f}")
+
+        # Step 9: Attention output
+        attn_out = torch.matmul(attn_probs, values_e)
+        print(f"    AV:        nan={attn_out.isnan().any().item()}, "
+              f"min={attn_out.min().item():.6f}, max={attn_out.max().item():.6f}")
+
+        # Step 10: Output projection
+        attn_out_flat = attn_out.transpose(2, 1).contiguous().view(B, S, attn.nheads * attn.emb_v_per_head)
+        dense_out = attn.dense(attn_out_flat)
+        print(f"    dense:     nan={dense_out.isnan().any().item()}, "
+              f"min={dense_out.min().item():.6f}, max={dense_out.max().item():.6f}")
+
+        # Step 11: Residual
+        x_after_attn = dense_out + residual
+        print(f"    +residual: nan={x_after_attn.isnan().any().item()}, "
+              f"min={x_after_attn.min().item():.6f}, max={x_after_attn.max().item():.6f}")
+
+        # Step 12: FFN
+        residual2 = x_after_attn
+        x_ff_ln = layer.ff_ln(x_after_attn)
+        print(f"    ff_ln:     nan={x_ff_ln.isnan().any().item()}, "
+              f"min={x_ff_ln.min().item():.6f}, max={x_ff_ln.max().item():.6f}")
+        x_ff = layer.ff_sub_layer(x_ff_ln)
+        print(f"    ff:        nan={x_ff.isnan().any().item()}, "
+              f"min={x_ff.min().item():.6f}, max={x_ff.max().item():.6f}")
+        x_out = x_ff + residual2
+        print(f"    +residual: nan={x_out.isnan().any().item()}, "
+              f"min={x_out.min().item():.6f}, max={x_out.max().item():.6f}")
+
+        # Now compare: run same layer through actual SDPA (no MiniKV)
+        print(f"\n    --- COMPARISON: Same layer with SDPA (use_cache=False, no MiniKV) ---")
+        x2 = model.shared(input_ids)
+        residual2 = x2
+        x2 = layer.ln(x2)
+        x2 = layer.attn(q=x2, position_ids=None, past_key_value_state=None, use_cache=False)
+        print(f"    sdpa attn:  nan={x2.isnan().any().item()}, "
+              f"min={x2.min().item():.6f}, max={x2.max().item():.6f}")
+        x2 = x2 + residual2
+        x2_r = x2
+        x2 = layer.ff_ln(x2)
+        x2 = layer.ff_sub_layer(x2)
+        x2 = x2 + x2_r
+        print(f"    sdpa out:   nan={x2.isnan().any().item()}, "
+              f"min={x2.min().item():.6f}, max={x2.max().item():.6f}")
 
 
 def test_decode_divergence():
