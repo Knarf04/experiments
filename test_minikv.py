@@ -31,7 +31,7 @@ from fms.utils.minikv.selection import H2OSelection, SnapKVSelection
 
 
 def make_micro_model(kvheads=2, seed=42):
-    """Create a tiny LLaMA with random weights for testing."""
+    """Create a tiny LLaMA with properly initialized random weights."""
     torch.manual_seed(seed)
     config = LLaMAConfig(
         src_vocab_size=256,
@@ -44,9 +44,7 @@ def make_micro_model(kvheads=2, seed=42):
         max_expected_seq_len=512,
     )
     model = LLaMA(config)
-    for p in model.parameters():
-        if p.dim() > 1:
-            nn.init.normal_(p, std=0.02)
+    model.reset_parameters()
     model.eval()
     return model, config
 
