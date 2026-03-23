@@ -104,7 +104,7 @@ def main():
     ax1.set_xlim(0, 1)
 
     # Raw |Δforget| and |Δdt| per bin
-    w = 0.035
+    w = 0.02
     ax2.bar(bin_centers[valid] - w, mean_d_fg[valid], width=2 * w, alpha=0.7,
             color='tab:orange', label='|Δforget|')
     ax2.bar(bin_centers[valid] + w, mean_d_dt[valid], width=2 * w, alpha=0.7,

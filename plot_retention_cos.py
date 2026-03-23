@@ -53,19 +53,23 @@ def main():
     # cos_mean[layer_idx]: (nheads, npos, npos) — already batch-averaged by summarize.py
     cos_mean = {k: data[k]["state_cos_sim"] for k in layer_indices}
 
-    # ---- Per-layer lag profiles (head-averaged) ----
+    # ---- Per-layer lag profiles (per head) ----
     for layer_idx in layer_indices:
         mat = cos_mean[layer_idx]       # (H, npos, npos)
-        mat_avg = mat.mean(axis=0)      # (npos, npos)
-        npos = mat_avg.shape[0]
-        lags, means = lag_profile(mat_avg, npos)
+        nheads = mat.shape[0]
+        npos = mat.shape[1]
+        head_colors = plt.cm.tab20(np.linspace(0, 1, nheads))
 
         fig, ax = plt.subplots(figsize=(8, 5))
-        ax.plot(lags, means, linewidth=1.2)
+        for h in range(nheads):
+            lags, means = lag_profile(mat[h], npos)
+            ax.plot(lags, means, linewidth=0.9, color=head_colors[h],
+                    alpha=0.7, label=f"H{h}")
         ax.set_xlabel("Lag (i − j) in sampled positions", fontsize=11, fontweight='bold')
-        ax.set_ylabel("Mean cosine similarity (head-averaged)", fontsize=11, fontweight='bold')
-        ax.set_title(f"Layer {layer_idx} — retention lag profile", fontsize=11)
+        ax.set_ylabel("Mean cosine similarity", fontsize=11, fontweight='bold')
+        ax.set_title(f"Layer {layer_idx} — retention lag profile (per head)", fontsize=11)
         ax.set_ylim(bottom=0.0)
+        ax.legend(fontsize=6, ncol=4, loc='upper right')
         fig.tight_layout()
         fig.savefig(os.path.join(out_dir, f"[layer{layer_idx}]retention_cos.png"), dpi=600)
         plt.close(fig)
