@@ -448,7 +448,7 @@ def test_7_e2e_optimization():
             n_changed += 1
     assert n_changed > 0, "No parameters changed after optimization"
 
-    print(f"Test 7 PASSED: e2e optimization (losses: {[f'{l:.4f}' for l in losses]}, "
+    print(f"Test 7 PASSED: e2e optimization (losses: {[f'{l:.2e}' for l in losses]}, "
           f"{n_changed} params changed)")
 
 
@@ -495,39 +495,42 @@ def main():
 
     total_passed, total_failed = 0, 0
 
+    # Try to initialize distributed early so single-device tests run on rank 0 only
+    if not dist.is_initialized() and not args.single_only:
+        try:
+            dist.init_process_group(backend="nccl")
+            torch.cuda.set_device(dist.get_rank())
+        except Exception:
+            if args.cp_only:
+                print("ERROR: --cp-only requires torchrun (distributed init failed)")
+                sys.exit(1)
+
+    is_rank0 = (not dist.is_initialized()) or dist.get_rank() == 0
+
     if not args.cp_only:
-        print("=" * 60)
-        print("Single-device tests")
-        print("=" * 60)
-        p, f = run_tests(SINGLE_DEVICE_TESTS)
-        total_passed += p
-        total_failed += f
-
-    if not args.single_only:
-        # Initialize distributed if not already done
-        if not dist.is_initialized():
-            try:
-                dist.init_process_group(backend="nccl")
-            except Exception:
-                print("\nSkipping CP tests (no distributed environment).")
-                print("Run with: torchrun --nproc_per_node=N experiments/test_retention_loss.py --cp-only")
-                if args.cp_only:
-                    sys.exit(1)
-            else:
-                rank = dist.get_rank()
-                torch.cuda.set_device(rank)
-
-        if dist.is_initialized():
-            rank = dist.get_rank()
-            if rank == 0:
-                print("\n" + "=" * 60)
-                print(f"Multi-GPU CP tests (world_size={dist.get_world_size()})")
-                print("=" * 60)
-            dist.barrier()
-            p, f = run_tests(CP_TESTS)
+        if is_rank0:
+            print("=" * 60)
+            print("Single-device tests")
+            print("=" * 60)
+            p, f = run_tests(SINGLE_DEVICE_TESTS)
             total_passed += p
             total_failed += f
+        if dist.is_initialized():
             dist.barrier()
+
+    if not args.single_only and dist.is_initialized():
+        if is_rank0:
+            print("\n" + "=" * 60)
+            print(f"Multi-GPU CP tests (world_size={dist.get_world_size()})")
+            print("=" * 60)
+        dist.barrier()
+        p, f = run_tests(CP_TESTS)
+        total_passed += p
+        total_failed += f
+        dist.barrier()
+    elif not args.single_only and not dist.is_initialized():
+        print("\nSkipping CP tests (no distributed environment).")
+        print("Run with: torchrun --nproc_per_node=N experiments/test_retention_loss.py --cp-only")
 
     rank = dist.get_rank() if dist.is_initialized() else 0
     if rank == 0:
