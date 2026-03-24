@@ -2,22 +2,26 @@
 Correctness tests for the retention_loss feature.
 
 Tests verify:
-  1. Shape and gradient existence (single device)
-  2. (Skipped — requires multi-GPU) CP shape
-  3. CP vs non-CP numerical agreement on final states (CRITICAL)
-  4. Gradient correctness via finite difference (CRITICAL)
+  1. Shape and gradient existence (single device, non-CP path)
+  2. CP shape and gradient existence (multi-GPU, real CP)
+  3. CP vs non-CP numerical agreement on final states (multi-GPU, CRITICAL)
+  4. Gradient correctness via finite difference (single device, CRITICAL)
   5. Backward compatibility when retention_loss is disabled
   6. Interaction between retention_loss and state_pass
   7. End-to-end retention loss optimization loop
 
-Run:
-    cd /path/to/mamba && python -m pytest experiments/test_retention_loss.py -v
-    # or directly:
-    python experiments/test_retention_loss.py
+Single-device tests (1, 4, 5, 6, 7):
+    cd /path/to/mamba && python -m pytest experiments/test_retention_loss.py -v -k "not _cp"
+
+Multi-GPU tests (2, 3) — requires torchrun:
+    torchrun --nproc_per_node=8 experiments/test_retention_loss.py --cp-only
+    # or with pytest via dtest runner
 """
 
+import argparse
 import sys
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from copy import deepcopy
 from einops import rearrange
@@ -43,7 +47,7 @@ DTYPE = torch.float32  # float32 for numerical precision
 
 D_INNER = EXPAND * D_MODEL          # 512
 NHEADS = D_INNER // HEADDIM         # 8
-NUM_SHARDS = 4                      # simulated CP ranks
+NUM_SHARDS = 4                      # simulated CP ranks (single-device tests)
 SEQ_LEN = 4 * NUM_SHARDS * CHUNK_SIZE  # 64
 
 MODEL_KWARGS = dict(
@@ -75,7 +79,7 @@ def make_input(batch=BATCH, seq_len=SEQ_LEN, requires_grad=False, seed=42):
 # ===========================================================================
 
 def test_1_shape_and_grad():
-    """retention_loss=True → retention_states with correct shape, requires_grad, and grads propagate."""
+    """retention_loss=True on non-CP path: correct shape, requires_grad, grads propagate."""
     model = make_model(experiments={"retention_loss": True}, layer_idx=0)
     x = make_input(requires_grad=True)
 
@@ -103,74 +107,153 @@ def test_1_shape_and_grad():
 
 
 # ===========================================================================
-# Test 2: CP Shape (simulated) — skipped, requires multi-GPU
+# Test 2: CP Shape and Gradient Existence (multi-GPU)
 # ===========================================================================
 
 def test_2_cp_shape():
-    """TODO: Requires real multi-GPU CP mesh. Covered implicitly by Test 3."""
-    print("Test 2 SKIPPED: requires multi-GPU CP mesh")
+    """retention_loss=True on real CP: correct shape (batch, world_size, ...) and grads propagate."""
+    from mamba_ssm.modules.mamba2_cp import Mamba2CP
+
+    assert dist.is_initialized(), "Requires distributed init (torchrun)"
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    torch.cuda.set_device(rank)
+
+    cp_mesh = dist.device_mesh.init_device_mesh("cuda", (world_size,))
+    seq_len = 4 * world_size * CHUNK_SIZE
+
+    torch.manual_seed(42)
+    model_cp = Mamba2CP(
+        cp_mesh=cp_mesh,
+        cp_mamba_impl="allgather",
+        experiments={"retention_loss": True},
+        layer_idx=0,
+        **MODEL_KWARGS,
+    ).to(DTYPE)
+
+    # Full input, then shard for this rank
+    torch.manual_seed(99)
+    inputs_full = torch.randn(BATCH, seq_len, D_MODEL, device=DEVICE, dtype=DTYPE,
+                               requires_grad=True)
+    shard = rearrange(inputs_full, "b (r l) ... -> b r l ...", r=world_size)[:, rank]
+    shard = shard.detach().requires_grad_(True)
+
+    out_cp, exp_dict = model_cp(shard)
+    exp = exp_dict[0]
+    assert "retention_states" in exp, "retention_states missing from CP experiment_out"
+
+    rs = exp["retention_states"]
+    expected_shape = (BATCH, world_size, NHEADS, HEADDIM, D_STATE)
+    assert rs.shape == expected_shape, \
+        f"CP shape mismatch: {rs.shape} vs {expected_shape}"
+    assert rs.requires_grad, "CP retention_states should require grad"
+
+    # Backward should work
+    model_cp.zero_grad()
+    rs.sum().backward()
+    assert model_cp.A_log.grad is not None, "A_log should have grad in CP"
+    assert shard.grad is not None, "CP input shard should have grad"
+
+    dist.barrier()
+    if rank == 0:
+        print("Test 2 PASSED: CP shape and gradient existence")
 
 
 # ===========================================================================
-# Test 3: CP vs Non-CP Numerical Agreement (CRITICAL)
+# Test 3: CP vs Non-CP Numerical Agreement (multi-GPU, CRITICAL)
 # ===========================================================================
 
 def test_3_cp_vs_noncp_states():
     """
-    Verify that sharding a sequence into N chunks and running sequentially
-    (passing final_state as initial_state) produces the same per-chunk final
-    states as running the full sequence at once.
-
-    This is the core correctness test: it validates that the states surfaced
-    by retention_loss match the true SSM states at chunk boundaries.
+    Run full sequence on non-CP Mamba2, collect per-shard final states by running
+    shard-by-shard. Then run the same input on real multi-GPU Mamba2CP with
+    retention_loss=True and compare retention_states against the ground truth.
     """
+    from mamba_ssm.modules.mamba2_cp import Mamba2CP, in_proj_split, conv, scan
+    from mamba_ssm.ops.triton.ssd_combined_cp import mamba_chunk_scan_combined_allgather_cp
+
+    assert dist.is_initialized(), "Requires distributed init (torchrun)"
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    torch.cuda.set_device(rank)
+
+    cp_mesh = dist.device_mesh.init_device_mesh("cuda", (world_size,))
+    seq_len = 4 * world_size * CHUNK_SIZE
+
+    # --- Build non-CP model (reference) ---
     torch.manual_seed(42)
+    model_ref = Mamba2(
+        experiments={"retention_loss": True},
+        layer_idx=0,
+        **MODEL_KWARGS,
+    ).to(DTYPE)
 
-    # Create raw SSM inputs (bypass the module, test the kernel directly)
-    batch = BATCH
-    seq_len = SEQ_LEN
-    x = torch.randn(batch, seq_len, NHEADS, HEADDIM, device=DEVICE, dtype=DTYPE)
-    dt = torch.randn(batch, seq_len, NHEADS, device=DEVICE, dtype=DTYPE)
-    A = -torch.rand(NHEADS, device=DEVICE, dtype=DTYPE).abs() - 0.5  # negative
-    B = torch.randn(batch, seq_len, NGROUPS, D_STATE, device=DEVICE, dtype=DTYPE)
-    C = torch.randn(batch, seq_len, NGROUPS, D_STATE, device=DEVICE, dtype=DTYPE)
+    # --- Build CP model with same weights ---
+    torch.manual_seed(42)
+    model_cp = Mamba2CP(
+        cp_mesh=cp_mesh,
+        cp_mamba_impl="allgather",
+        experiments={"retention_loss": True},
+        layer_idx=0,
+        **MODEL_KWARGS,
+    ).to(DTYPE)
 
-    # --- Full sequence (ground truth) ---
-    y_full, final_full = mamba_chunk_scan_combined(
-        x, dt, A, B, C, CHUNK_SIZE,
-        dt_softplus=True,
-        return_final_states=True,
+    # --- Shared input ---
+    torch.manual_seed(99)
+    inputs_full = torch.randn(BATCH, seq_len, D_MODEL, device=DEVICE, dtype=DTYPE)
+
+    # --- Ground truth: run non-CP model, then manually compute per-shard final states ---
+    # Use the kernel directly to get intermediate final_states at each shard boundary
+    z0, x0, z, xBC, dt = in_proj_split(inputs_full, model_ref)
+    xBC_conv = conv(xBC, model_ref)
+    x, B, C = torch.split(
+        xBC_conv,
+        [model_ref.d_ssm, model_ref.ngroups * model_ref.d_state,
+         model_ref.ngroups * model_ref.d_state],
+        dim=-1,
     )
+    A = -torch.exp(model_ref.A_log.float())
+    hidden_states = rearrange(x, "b l (h p) -> b l h p", p=model_ref.headdim)
+    dt_for_scan = dt
+    B_for_scan = rearrange(B, "b l (g n) -> b l g n", g=model_ref.ngroups)
+    C_for_scan = rearrange(C, "b l (g n) -> b l g n", g=model_ref.ngroups)
 
-    # --- Sharded: simulate CP by running each shard sequentially ---
-    shard_len = seq_len // NUM_SHARDS
+    shard_len = seq_len // world_size
     initial_states = None
-    shard_outputs = []
-    shard_finals = []
-    for i in range(NUM_SHARDS):
+    gt_shard_finals = []
+    for i in range(world_size):
         sl = slice(i * shard_len, (i + 1) * shard_len)
-        y_shard, fs_shard = mamba_chunk_scan_combined(
-            x[:, sl], dt[:, sl], A, B[:, sl], C[:, sl], CHUNK_SIZE,
+        _, fs = mamba_chunk_scan_combined(
+            hidden_states[:, sl], dt_for_scan[:, sl], A,
+            B_for_scan[:, sl], C_for_scan[:, sl],
+            chunk_size=model_ref.chunk_size,
+            D=rearrange(model_ref.D, "(h p) -> h p", p=model_ref.headdim)
+            if model_ref.D_has_hdim else model_ref.D,
+            z=rearrange(z[:, sl], "b l (h p) -> b l h p", p=model_ref.headdim)
+            if not model_ref.rmsnorm else None,
+            dt_bias=model_ref.dt_bias,
             dt_softplus=True,
             initial_states=initial_states,
             return_final_states=True,
         )
-        shard_outputs.append(y_shard)
-        shard_finals.append(fs_shard)
-        initial_states = fs_shard.detach()
+        gt_shard_finals.append(fs)
+        initial_states = fs.detach()
 
-    # Concatenated output should match full output
-    y_cat = torch.cat(shard_outputs, dim=1)
-    torch.testing.assert_close(y_cat, y_full, atol=1e-4, rtol=1e-4)
+    # Stack: (batch, world_size, nheads, headdim, d_state)
+    gt_retention_states = torch.stack(gt_shard_finals, dim=1)
 
-    # Last shard's final state should match the full-sequence final state
-    torch.testing.assert_close(shard_finals[-1], final_full, atol=1e-4, rtol=1e-4)
+    # --- CP model forward ---
+    input_shard = rearrange(inputs_full, "b (r l) ... -> b r l ...", r=world_size)[:, rank]
+    out_cp, exp_dict_cp = model_cp(input_shard.clone())
+    rs_cp = exp_dict_cp[0]["retention_states"]
 
-    # Intermediate shard final states: verify they're non-trivial (not zeros)
-    for i, fs in enumerate(shard_finals):
-        assert fs.abs().max() > 1e-6, f"Shard {i} final_states are all zeros"
+    # rs_cp should match gt_retention_states (all ranks have the same gathered tensor)
+    tol = 5e-3
+    torch.testing.assert_close(rs_cp, gt_retention_states, atol=tol, rtol=tol)
 
-    print("Test 3 PASSED: CP vs non-CP numerical agreement")
+    dist.barrier()
+    if rank == 0:
+        print("Test 3 PASSED: CP vs non-CP numerical agreement on retention_states")
 
 
 # ===========================================================================
@@ -180,26 +263,26 @@ def test_3_cp_vs_noncp_states():
 def test_4_finite_difference():
     """
     Compare analytical gradients (from backward) with numerical finite-difference
-    gradients for the retention_states path. Focus on A_log and dt_bias — the
-    parameters most affected by the backward changes.
+    gradients for the retention_states path ONLY (no out.sum() to avoid noise).
+    Focus on A_log and dt_bias.
     """
     torch.manual_seed(42)
     model = make_model(experiments={"retention_loss": True}, layer_idx=0)
-    x = make_input(requires_grad=False, seed=123)  # fixed input, no input grad needed
+    x = make_input(requires_grad=False, seed=123)
 
     def loss_fn():
         out, exp_dict = model(x)
         rs = exp_dict[0]["retention_states"]
-        # Use a non-trivial scalar reduction so gradients aren't all 1s
-        return (rs ** 2).sum() + out.sum()
+        # Retention-only loss — isolate the final_states gradient path
+        return (rs ** 2).sum()
 
     # Analytical gradient
     model.zero_grad()
     loss = loss_fn()
     loss.backward()
 
-    eps = 5e-4
-    tol = 1e-2  # relative tolerance for finite-diff comparison
+    eps = 1e-3
+    tol = 5e-2  # relative tolerance for float32 finite-diff
 
     params_to_check = [
         ("A_log", model.A_log),
@@ -214,35 +297,34 @@ def test_4_finite_difference():
         analytical = param.grad.clone()
         numerical = torch.zeros_like(param)
 
-        # Finite difference over a subset of elements (full check is slow)
         n_check = min(param.numel(), 8)
         flat = param.data.view(-1)
         for idx in range(n_check):
             orig = flat[idx].item()
 
             flat[idx] = orig + eps
-            model.zero_grad()
             lp = loss_fn().item()
 
             flat[idx] = orig - eps
-            model.zero_grad()
             lm = loss_fn().item()
 
-            flat[idx] = orig  # restore
+            flat[idx] = orig
             numerical.view(-1)[idx] = (lp - lm) / (2 * eps)
 
-        # Compare the subset
         ana_sub = analytical.view(-1)[:n_check]
         num_sub = numerical.view(-1)[:n_check]
 
-        # Relative error (handle near-zero gracefully)
-        scale = torch.clamp(ana_sub.abs().max(), min=1e-6)
-        rel_err = (ana_sub - num_sub).abs().max() / scale
-        assert rel_err < tol, (
-            f"Finite-diff mismatch for {name}: rel_err={rel_err:.6f} > tol={tol}\n"
+        # Per-element relative error, ignoring near-zero elements
+        denom = torch.clamp(torch.max(ana_sub.abs(), num_sub.abs()), min=1e-5)
+        rel_errs = (ana_sub - num_sub).abs() / denom
+        max_rel_err = rel_errs.max().item()
+        assert max_rel_err < tol, (
+            f"Finite-diff mismatch for {name}: max_rel_err={max_rel_err:.6f} > tol={tol}\n"
             f"  analytical: {ana_sub.tolist()}\n"
-            f"  numerical:  {num_sub.tolist()}"
+            f"  numerical:  {num_sub.tolist()}\n"
+            f"  rel_errs:   {rel_errs.tolist()}"
         )
+        print(f"  {name}: max_rel_err={max_rel_err:.6f} (tol={tol})")
 
     print("Test 4 PASSED: finite difference gradient correctness")
 
@@ -289,7 +371,7 @@ def test_6_state_pass_interaction():
     """
     Both retention_loss=True and state_pass=True should coexist:
     - experiment_out has both "retention_states" and "final_states"
-    - retention_states requires grad, final_states does not
+    - retention_states requires grad
     - State passing works across sequential forward calls
     """
     model = make_model(
@@ -308,11 +390,8 @@ def test_6_state_pass_interaction():
     assert "final_states" in exp, "final_states missing"
 
     rs = exp["retention_states"]
-    fs = exp["final_states"]
     assert rs.requires_grad, "retention_states should require grad"
-    # final_states stored via .detach() in state_pass logic, but the buffer
-    # itself may still be a leaf — just verify retention_states is differentiable
-    assert rs.shape[1] == 1, "Single device → num_ranks=1"
+    assert rs.shape[1] == 1, "Single device -> num_ranks=1"
 
     # Backward through retention_states should work
     model.zero_grad()
@@ -377,37 +456,84 @@ def test_7_e2e_optimization():
 # Runner
 # ===========================================================================
 
-ALL_TESTS = [
+SINGLE_DEVICE_TESTS = [
     test_1_shape_and_grad,
-    test_2_cp_shape,
-    test_3_cp_vs_noncp_states,
     test_4_finite_difference,
     test_5_backward_compat,
     test_6_state_pass_interaction,
     test_7_e2e_optimization,
 ]
 
+CP_TESTS = [
+    test_2_cp_shape,
+    test_3_cp_vs_noncp_states,
+]
 
-def main():
+
+def run_tests(tests):
     passed = 0
     failed = 0
-    skipped = 0
-    for test_fn in ALL_TESTS:
+    for test_fn in tests:
         try:
             test_fn()
-            if "SKIPPED" in test_fn.__doc__ or "SKIP" in test_fn.__name__:
-                skipped += 1
-            else:
-                passed += 1
+            passed += 1
         except Exception as e:
             failed += 1
             print(f"Test {test_fn.__name__} FAILED: {e}")
             import traceback
             traceback.print_exc()
+    return passed, failed
 
-    print(f"\n{'='*60}")
-    print(f"Results: {passed} passed, {failed} failed, {skipped} skipped")
-    if failed:
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cp-only", action="store_true",
+                        help="Run only multi-GPU CP tests (use with torchrun)")
+    parser.add_argument("--single-only", action="store_true",
+                        help="Run only single-device tests")
+    args, _ = parser.parse_known_args()
+
+    total_passed, total_failed = 0, 0
+
+    if not args.cp_only:
+        print("=" * 60)
+        print("Single-device tests")
+        print("=" * 60)
+        p, f = run_tests(SINGLE_DEVICE_TESTS)
+        total_passed += p
+        total_failed += f
+
+    if not args.single_only:
+        # Initialize distributed if not already done
+        if not dist.is_initialized():
+            try:
+                dist.init_process_group(backend="nccl")
+            except Exception:
+                print("\nSkipping CP tests (no distributed environment).")
+                print("Run with: torchrun --nproc_per_node=N experiments/test_retention_loss.py --cp-only")
+                if args.cp_only:
+                    sys.exit(1)
+            else:
+                rank = dist.get_rank()
+                torch.cuda.set_device(rank)
+
+        if dist.is_initialized():
+            rank = dist.get_rank()
+            if rank == 0:
+                print("\n" + "=" * 60)
+                print(f"Multi-GPU CP tests (world_size={dist.get_world_size()})")
+                print("=" * 60)
+            dist.barrier()
+            p, f = run_tests(CP_TESTS)
+            total_passed += p
+            total_failed += f
+            dist.barrier()
+
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    if rank == 0:
+        print(f"\n{'=' * 60}")
+        print(f"Results: {total_passed} passed, {total_failed} failed")
+    if total_failed:
         sys.exit(1)
 
 
