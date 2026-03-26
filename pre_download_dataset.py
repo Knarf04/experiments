@@ -85,21 +85,21 @@ datasets_to_download = [
     ('Xnhyacinth/LongBench', 'triviaqa_e'),
     ('Xnhyacinth/LongBench', 'vcsum'),
 
-    # === Perplexity: WikiText ===
-    ('EleutherAI/wikitext_document_level', 'wikitext-2-raw-v1'),
+    # === Perplexity: WikiText (test split only) ===
+    ('EleutherAI/wikitext_document_level', 'wikitext-2-raw-v1', 'test'),
 
-    # === Perplexity: Pile (11 configs available on HF) ===
-    ('EleutherAI/pile', 'all'),
-    ('EleutherAI/pile', 'enron_emails'),
-    ('EleutherAI/pile', 'europarl'),
-    ('EleutherAI/pile', 'free_law'),
-    ('EleutherAI/pile', 'hacker_news'),
-    ('EleutherAI/pile', 'nih_exporter'),
-    ('EleutherAI/pile', 'pubmed'),
-    ('EleutherAI/pile', 'pubmed_central'),
-    ('EleutherAI/pile', 'ubuntu_irc'),
-    ('EleutherAI/pile', 'uspto'),
-    ('EleutherAI/pile', 'github'),
+    # === Perplexity: Pile (test split only — full dataset is ~800GB) ===
+    ('EleutherAI/pile', 'all', 'test'),
+    ('EleutherAI/pile', 'enron_emails', 'test'),
+    ('EleutherAI/pile', 'europarl', 'test'),
+    ('EleutherAI/pile', 'free_law', 'test'),
+    ('EleutherAI/pile', 'hacker_news', 'test'),
+    ('EleutherAI/pile', 'nih_exporter', 'test'),
+    ('EleutherAI/pile', 'pubmed', 'test'),
+    ('EleutherAI/pile', 'pubmed_central', 'test'),
+    ('EleutherAI/pile', 'ubuntu_irc', 'test'),
+    ('EleutherAI/pile', 'uspto', 'test'),
+    ('EleutherAI/pile', 'github', 'test'),
 
     # === LongBench v2 (20 configs) ===
     ('recursal/longbench-v2', 'academic_multi'),
@@ -124,11 +124,16 @@ datasets_to_download = [
     ('recursal/longbench-v2', 'user_guide_qa'),
 ]
 
-for ds_path, ds_name in datasets_to_download:
+for entry in datasets_to_download:
+    ds_path = entry[0]
+    ds_name = entry[1] if len(entry) > 1 else None
+    split = entry[2] if len(entry) > 2 else None
     label = f"{ds_path}/{ds_name}" if ds_name else ds_path
+    if split:
+        label += f" (split={split})"
     print(f"Downloading {label}...")
     try:
-        load_dataset(ds_path, ds_name)
+        load_dataset(ds_path, ds_name, split=split)
         print(f"  Done.")
     except Exception as e:
         print(f"  FAILED: {e}")
