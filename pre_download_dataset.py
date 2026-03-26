@@ -85,21 +85,12 @@ datasets_to_download = [
     ('Xnhyacinth/LongBench', 'triviaqa_e'),
     ('Xnhyacinth/LongBench', 'vcsum'),
 
-    # === Perplexity: WikiText (test split only) ===
-    ('EleutherAI/wikitext_document_level', 'wikitext-2-raw-v1', 'test'),
+    # === Perplexity: WikiText ===
+    ('EleutherAI/wikitext_document_level', 'wikitext-2-raw-v1'),
 
-    # === Perplexity: Pile (test split only — full dataset is ~800GB) ===
-    ('EleutherAI/pile', 'all', 'test'),
-    ('EleutherAI/pile', 'enron_emails', 'test'),
-    ('EleutherAI/pile', 'europarl', 'test'),
-    ('EleutherAI/pile', 'free_law', 'test'),
-    ('EleutherAI/pile', 'hacker_news', 'test'),
-    ('EleutherAI/pile', 'nih_exporter', 'test'),
-    ('EleutherAI/pile', 'pubmed', 'test'),
-    ('EleutherAI/pile', 'pubmed_central', 'test'),
-    ('EleutherAI/pile', 'ubuntu_irc', 'test'),
-    ('EleutherAI/pile', 'uspto', 'test'),
-    ('EleutherAI/pile', 'github', 'test'),
+    # === Perplexity: Pile ===
+    # NOTE: Pile is huge. These are downloaded separately below with split='test'.
+
 
     # === LongBench v2 (20 configs) ===
     ('recursal/longbench-v2', 'academic_multi'),
@@ -127,13 +118,53 @@ datasets_to_download = [
 for entry in datasets_to_download:
     ds_path = entry[0]
     ds_name = entry[1] if len(entry) > 1 else None
-    split = entry[2] if len(entry) > 2 else None
     label = f"{ds_path}/{ds_name}" if ds_name else ds_path
-    if split:
-        label += f" (split={split})"
     print(f"Downloading {label}...")
     try:
-        load_dataset(ds_path, ds_name, split=split)
+        load_dataset(ds_path, ds_name)
         print(f"  Done.")
     except Exception as e:
         print(f"  FAILED: {e}")
+
+# Pile: patch _split_generators to only download the test split (~5GB vs ~800GB)
+def download_pile_test_only(config='all'):
+    """Download only the test split of EleutherAI/pile by monkey-patching
+    _split_generators to skip the massive train/val downloads."""
+    import importlib
+    import datasets
+    from datasets import load_dataset_builder
+
+    builder = load_dataset_builder('EleutherAI/pile', config)
+
+    if config != 'all':
+        print(f"  Skipping EleutherAI/pile/{config}: only 'all' has a test split.")
+        return
+
+    # Grab the module where _DATA_URLS is defined
+    mod = importlib.import_module(builder.__class__.__module__)
+    orig_method = builder.__class__._split_generators
+
+    def _test_only_split_generators(self, dl_manager):
+        # Only download the test file URLs
+        test_urls = {"test": mod._DATA_URLS[self.config.name]["test"]}
+        data_dir = dl_manager.download(test_urls)
+        return [
+            datasets.SplitGenerator(
+                name=datasets.Split.TEST,
+                gen_kwargs={"files": data_dir["test"]},
+            )
+        ]
+
+    # Patch, prepare, restore
+    builder.__class__._split_generators = _test_only_split_generators
+    try:
+        builder.download_and_prepare()
+    finally:
+        builder.__class__._split_generators = orig_method
+
+print("Downloading EleutherAI/pile/all (test only)...")
+try:
+    download_pile_test_only('all')
+    print("  Done.")
+except Exception as e:
+    print(f"  FAILED: {e}")
