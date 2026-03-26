@@ -88,9 +88,8 @@ datasets_to_download = [
     # === Perplexity: WikiText ===
     ('EleutherAI/wikitext_document_level', 'wikitext-2-raw-v1'),
 
-    # === Perplexity: Pile ===
-    # NOTE: Pile is huge. These are downloaded separately below with split='test'.
-
+    # NOTE: EleutherAI/pile is unavailable — original host (the-eye.eu) is down.
+    # Use wikitext above for perplexity evaluation instead.
 
     # === LongBench v2 (20 configs) ===
     ('recursal/longbench-v2', 'academic_multi'),
@@ -126,45 +125,3 @@ for entry in datasets_to_download:
     except Exception as e:
         print(f"  FAILED: {e}")
 
-# Pile: patch _split_generators to only download the test split (~5GB vs ~800GB)
-def download_pile_test_only(config='all'):
-    """Download only the test split of EleutherAI/pile by monkey-patching
-    _split_generators to skip the massive train/val downloads."""
-    import importlib
-    import datasets
-    from datasets import load_dataset_builder
-
-    builder = load_dataset_builder('EleutherAI/pile', config)
-
-    if config != 'all':
-        print(f"  Skipping EleutherAI/pile/{config}: only 'all' has a test split.")
-        return
-
-    # Grab the module where _DATA_URLS is defined
-    mod = importlib.import_module(builder.__class__.__module__)
-    orig_method = builder.__class__._split_generators
-
-    def _test_only_split_generators(self, dl_manager):
-        # Only download the test file URLs
-        test_urls = {"test": mod._DATA_URLS[self.config.name]["test"]}
-        data_dir = dl_manager.download(test_urls)
-        return [
-            datasets.SplitGenerator(
-                name=datasets.Split.TEST,
-                gen_kwargs={"files": data_dir["test"]},
-            )
-        ]
-
-    # Patch, prepare, restore
-    builder.__class__._split_generators = _test_only_split_generators
-    try:
-        builder.download_and_prepare()
-    finally:
-        builder.__class__._split_generators = orig_method
-
-print("Downloading EleutherAI/pile/all (test only)...")
-try:
-    download_pile_test_only('all')
-    print("  Done.")
-except Exception as e:
-    print(f"  FAILED: {e}")
