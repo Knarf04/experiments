@@ -135,8 +135,14 @@ datasets_to_download = [
     ('recursal/longbench-v2', 'user_guide_qa'),
 ]
 
-# NOTE: PG19 is pre-downloaded at /gpfs/hshen/dataset/pg19 (validation only).
-# Train/test file lists were truncated to headers to save space.
+# === PG19: git-cloned at /gpfs/hshen/dataset/pg19 with train/test txt files
+# truncated to headers. load_dataset triggers the actual validation data download.
+print("Downloading deepmind/pg19 (validation only)...")
+try:
+    load_dataset("/gpfs/hshen/dataset/pg19")
+    print("  Done.")
+except Exception as e:
+    print(f"  FAILED: {e}")
 
 for entry in datasets_to_download:
     ds_path = entry[0]
