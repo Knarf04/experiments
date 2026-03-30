@@ -109,8 +109,6 @@ datasets_to_download = [
     ('ccdv/govreport-summarization', None),
     ('tau/scrolls', 'qmsum'),
     ('allenai/qasper', None),
-    ('deepmind/pg19', None),
-
     # NOTE: EleutherAI/pile is unavailable — original host (the-eye.eu) is down.
     # Use wikitext above for perplexity evaluation instead.
 
@@ -136,6 +134,9 @@ datasets_to_download = [
     ('recursal/longbench-v2', 'table_qa'),
     ('recursal/longbench-v2', 'user_guide_qa'),
 ]
+
+# NOTE: PG19 is pre-downloaded at /gpfs/hshen/dataset/pg19 (validation only).
+# Train/test file lists were truncated to headers to save space.
 
 for entry in datasets_to_download:
     ds_path = entry[0]
