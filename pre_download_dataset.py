@@ -105,6 +105,12 @@ datasets_to_download = [
     # === Perplexity: WikiText ===
     ('EleutherAI/wikitext_document_level', 'wikitext-2-raw-v1'),
 
+    # === Perplexity: Long-context datasets (long_ppl) ===
+    ('ccdv/govreport-summarization', None),
+    ('tau/scrolls', 'qmsum'),
+    ('allenai/qasper', None),
+    ('deepmind/pg19', None),
+
     # NOTE: EleutherAI/pile is unavailable — original host (the-eye.eu) is down.
     # Use wikitext above for perplexity evaluation instead.
 
