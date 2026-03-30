@@ -85,6 +85,23 @@ datasets_to_download = [
     ('Xnhyacinth/LongBench', 'triviaqa_e'),
     ('Xnhyacinth/LongBench', 'vcsum'),
 
+    # === lm-eval-harness common tasks ===
+    # lambada_openai
+    ('EleutherAI/lambada_openai', 'default'),
+    # piqa
+    ('baber/piqa', None),
+    # hellaswag
+    ('Rowan/hellaswag', None),
+    # winogrande
+    ('allenai/winogrande', 'winogrande_xl'),
+    # arc_easy + arc_challenge
+    ('allenai/ai2_arc', 'ARC-Easy'),
+    ('allenai/ai2_arc', 'ARC-Challenge'),
+    # siqa (social_iqa)
+    ('allenai/social_i_qa', None),
+    # boolq (via super_glue)
+    ('aps/super_glue', 'boolq'),
+
     # === Perplexity: WikiText ===
     ('EleutherAI/wikitext_document_level', 'wikitext-2-raw-v1'),
 
