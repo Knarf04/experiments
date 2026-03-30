@@ -137,12 +137,16 @@ datasets_to_download = [
 ]
 
 # === PG19: download validation split only, save as local JSONL ===
+# Use streaming=True to avoid downloading the massive train/test splits.
 PG19_JSONL = "/gpfs/hshen/dataset/pg19_validation.jsonl"
 if not os.path.exists(PG19_JSONL):
+    import json
     print(f"Downloading deepmind/pg19 validation split to {PG19_JSONL}...")
     try:
-        ds = load_dataset("deepmind/pg19", split="validation")
-        ds.to_json(PG19_JSONL)
+        ds = load_dataset("deepmind/pg19", split="validation", streaming=True)
+        with open(PG19_JSONL, "w") as f:
+            for example in ds:
+                f.write(json.dumps(example) + "\n")
         print("  Done.")
     except Exception as e:
         print(f"  FAILED: {e}")
