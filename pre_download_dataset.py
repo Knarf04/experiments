@@ -1,3 +1,4 @@
+import os
 from datasets import load_dataset
 
 datasets_to_download = [
@@ -135,14 +136,18 @@ datasets_to_download = [
     ('recursal/longbench-v2', 'user_guide_qa'),
 ]
 
-# === PG19: git-cloned at /gpfs/hshen/dataset/pg19 with train/test txt files
-# truncated to headers. load_dataset triggers the actual validation data download.
-print("Downloading deepmind/pg19 (validation only)...")
-try:
-    load_dataset("/gpfs/hshen/dataset/pg19")
-    print("  Done.")
-except Exception as e:
-    print(f"  FAILED: {e}")
+# === PG19: download validation split only, save as local JSONL ===
+PG19_JSONL = "/gpfs/hshen/dataset/pg19_validation.jsonl"
+if not os.path.exists(PG19_JSONL):
+    print(f"Downloading deepmind/pg19 validation split to {PG19_JSONL}...")
+    try:
+        ds = load_dataset("deepmind/pg19", split="validation")
+        ds.to_json(PG19_JSONL)
+        print("  Done.")
+    except Exception as e:
+        print(f"  FAILED: {e}")
+else:
+    print(f"PG19 validation already exists at {PG19_JSONL}, skipping.")
 
 for entry in datasets_to_download:
     ds_path = entry[0]
