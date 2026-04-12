@@ -103,10 +103,15 @@ def eval_windows(args, model, dataloader, device, rank, window_size, experiments
     total_nll = torch.zeros(1, device=device, dtype=torch.float64)
     total_tok = torch.zeros(1, device=device, dtype=torch.long)
 
+    import sys
+    batch_idx = 0
     pbar = tqdm(dataloader, desc=f"windows (len={window_size})", disable=(rank != 0))
     for batch in pbar:
         input_ids = batch["input_ids"].to(device)  # [B, L] — real tokens only ✓
         B = input_ids.size(0)
+        print(f"[DIAG][rank={rank}] batch={batch_idx} shape={list(input_ids.shape)} "
+              f"mem={torch.cuda.memory_allocated(device)/1e9:.2f}GB", file=sys.stderr, flush=True)
+        batch_idx += 1
 
         # Every window in this batch is padding-free — inform recording layers
         if experiments is not None:
@@ -154,7 +159,26 @@ def eval_windows(args, model, dataloader, device, rank, window_size, experiments
     return total_nll[0], total_tok[0]
 
 
+def _install_sigbus_handler():
+    """Register a handler that prints a Python traceback on SIGBUS before dying."""
+    import signal, sys, traceback, faulthandler
+    faulthandler.enable(file=sys.stderr, all_threads=True)
+
+    def _handler(signum, frame):
+        print(f"\n{'='*60}", file=sys.stderr, flush=True)
+        print(f"CAUGHT SIGNAL {signum} (SIGBUS) — Python traceback:", file=sys.stderr, flush=True)
+        traceback.print_stack(frame, file=sys.stderr)
+        print(f"{'='*60}", file=sys.stderr, flush=True)
+        sys.stderr.flush()
+        # Re-raise so the process still exits with the right code
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    signal.signal(signal.SIGBUS, _handler)
+
+
 def main():
+    _install_sigbus_handler()
     parser = argparse.ArgumentParser()
     # Model & precision
     parser.add_argument("--model", type=str, required=True)
@@ -213,10 +237,13 @@ def main():
     if any(k in args.model.lower() for k in ("nemotron", "bamba", "mamba")):
         model_kwargs["attn_implementation"] = "flash_attention_2"
 
+    import sys
+    print(f"[DIAG][rank={rank}] Loading model...", file=sys.stderr, flush=True)
     model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs)
     model.eval()
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
+    print(f"[DIAG][rank={rank}] Model loaded.", file=sys.stderr, flush=True)
 
     # Capture experiments dict before FSDP wrapping.
     # Every Bamba/NemotronH/Mamba2 layer stores a reference to this same dict,
@@ -229,6 +256,7 @@ def main():
         fsdp_kwargs["offload_policy"] = CPUOffloadPolicy()
 
     # FSDP2: shard leaf transformer layers first, then the root (bottom-up)
+    print(f"[DIAG][rank={rank}] Sharding FSDP (layer_types={[t.__name__ for t in layer_types]})...", file=sys.stderr, flush=True)
     for module in model.modules():
         if type(module) in layer_types:
             fully_shard(module, **fsdp_kwargs)
@@ -236,6 +264,7 @@ def main():
     if not args.cpu_offload:
         model.to(device)  # each rank holds only 1/world_size of params after sharding
     fsdp_model = model
+    print(f"[DIAG][rank={rank}] FSDP ready. GPU mem={torch.cuda.memory_allocated(device)/1e9:.2f}GB", file=sys.stderr, flush=True)
 
     # Iterate over each requested sequence length
     results = []  # list of (window_size, stride, ppl, n_windows)
