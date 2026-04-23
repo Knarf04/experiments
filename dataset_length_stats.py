@@ -19,6 +19,7 @@ Typical usage matching the provided CLI:
 import argparse
 import json
 import math
+import multiprocessing as mp
 import os
 import statistics
 import sys
@@ -77,7 +78,7 @@ def iter_doc_lengths(
     max_docs: int,
     log_every: int,
 ):
-    """Yield the token length of each document, across all shards."""
+    """Yield the token length of each document, across all shards (serial)."""
     seen = 0
     t0 = time.time()
     for shard_idx, path in enumerate(shard_paths):
@@ -109,6 +110,86 @@ def iter_doc_lengths(
                 )
             if max_docs and seen >= max_docs:
                 return
+
+
+# --- Parallel scan helpers (one shard per task) ---------------------------
+
+_WORKER_HANDLER = None
+_WORKER_DROP = None
+
+
+def _init_worker(file_type, tokenizer_path, col_names, max_doclen, drop_tokens):
+    """Pool initializer: build one handler per worker process."""
+    global _WORKER_HANDLER, _WORKER_DROP
+    _WORKER_HANDLER = build_handler(file_type, tokenizer_path, col_names, max_doclen)
+    _WORKER_DROP = drop_tokens
+
+
+def _scan_one_shard(shard_path):
+    """Read all docs in a shard, return their lengths. Returns
+    (shard_path, lengths, error_message_or_None)."""
+    global _WORKER_HANDLER, _WORKER_DROP
+    try:
+        reader = _WORKER_HANDLER.open(shard_path)
+        n_docs = _WORKER_HANDLER.length(shard_path)
+    except Exception as e:
+        return shard_path, [], f"open failed: {e}"
+
+    lengths = []
+    errors = 0
+    for doc_idx in range(n_docs):
+        try:
+            doc = _WORKER_HANDLER.get(reader, doc_idx, _WORKER_DROP)
+            lengths.append(len(doc))
+        except Exception:
+            errors += 1
+    err = f"{errors} doc read errors" if errors else None
+    return shard_path, lengths, err
+
+
+def scan_shards_parallel(
+    shard_paths,
+    file_type,
+    tokenizer_path,
+    col_names,
+    max_doclen,
+    drop_tokens,
+    num_workers: int,
+    max_docs: int,
+):
+    """Yield doc lengths from all shards, processed in parallel across workers.
+    Progress is logged once per shard completion (natural granularity in the
+    parallel path; the per-doc log_every knob is ignored here)."""
+    ctx = mp.get_context("fork" if sys.platform != "win32" else "spawn")
+    t0 = time.time()
+    seen = 0
+    n_shards_done = 0
+    n_shards = len(shard_paths)
+
+    with ctx.Pool(
+        processes=num_workers,
+        initializer=_init_worker,
+        initargs=(file_type, tokenizer_path, col_names, max_doclen, drop_tokens),
+    ) as pool:
+        for shard_path, lens, err in pool.imap_unordered(_scan_one_shard, shard_paths):
+            n_shards_done += 1
+            if err:
+                print(f"[warn] {shard_path}: {err}", file=sys.stderr)
+            rate = (seen + len(lens)) / max(time.time() - t0, 1e-9)
+            print(
+                f"  shard {n_shards_done}/{n_shards} done: "
+                f"{os.path.basename(shard_path)}  "
+                f"(+{len(lens):,} docs, total {seen + len(lens):,}, "
+                f"{rate:,.0f} docs/s)",
+                file=sys.stderr,
+                flush=True,
+            )
+            for L in lens:
+                yield L
+                seen += 1
+                if max_docs and seen >= max_docs:
+                    pool.terminate()
+                    return
 
 
 def plot_histogram(lengths, title, out_path, n_bins=80):
@@ -253,6 +334,8 @@ def main():
                     help="Number of histogram bins (log-spaced).")
     ap.add_argument("--no_plot", action="store_true",
                     help="Disable histogram plotting.")
+    ap.add_argument("--num_workers", type=int, default=8,
+                    help="Parallel workers for shard scanning (1 = serial).")
     args = ap.parse_args()
 
     col_names = parse_cols_csv(args.col_name)
@@ -289,9 +372,24 @@ def main():
             print(f"    dumping per-doc lengths to {dump_path}")
 
         lengths = []
-        for L in iter_doc_lengths(
-            shards, handler, drop, args.max_docs, args.log_every,
-        ):
+        if args.num_workers > 1:
+            print(f"    scanning with {args.num_workers} workers")
+            iterator = scan_shards_parallel(
+                shards,
+                args.file_type,
+                args.tokenizer_path,
+                col_names,
+                args.doc_cutoff,
+                drop,
+                args.num_workers,
+                args.max_docs,
+            )
+        else:
+            iterator = iter_doc_lengths(
+                shards, handler, drop, args.max_docs, args.log_every,
+            )
+
+        for L in iterator:
             lengths.append(L)
             if dump_f is not None:
                 dump_f.write(f"{L}\n")
