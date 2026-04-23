@@ -18,11 +18,16 @@ Typical usage matching the provided CLI:
 
 import argparse
 import json
+import math
 import os
 import statistics
 import sys
 import time
 from collections import Counter
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 # Reuse the exact handlers used by the training loader.
 _FMS_FSDP = os.path.join(os.path.dirname(__file__), "..", "fms-fsdp")
@@ -104,6 +109,33 @@ def iter_doc_lengths(
                 )
             if max_docs and seen >= max_docs:
                 return
+
+
+def plot_histogram(lengths, title, out_path, n_bins=80):
+    """Log-scale histogram of document lengths."""
+    if not lengths:
+        return
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    arr = [max(L, 1) for L in lengths]  # avoid log(0)
+    lo = max(min(arr), 1)
+    hi = max(arr)
+    if hi <= lo:
+        hi = lo + 1
+    bins = [10 ** x for x in [
+        math.log10(lo) + i * (math.log10(hi) - math.log10(lo)) / n_bins
+        for i in range(n_bins + 1)
+    ]]
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.hist(arr, bins=bins, edgecolor="black", linewidth=0.3)
+    ax.set_xscale("log")
+    ax.set_xlabel("document length (tokens)")
+    ax.set_ylabel("count")
+    ax.set_title(title)
+    ax.grid(True, which="both", axis="both", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+    print(f"    histogram saved to {out_path}")
 
 
 def summarize(lengths, buckets):
@@ -215,6 +247,12 @@ def main():
     ap.add_argument("--dump_lengths", default="",
                     help="If set, write raw per-doc lengths to this text file "
                          "(one int per line per dataset; files suffixed by index).")
+    ap.add_argument("--plot_dir", default="/gpfs/hshen/plots/dataset_stats",
+                    help="Directory to save per-dataset histogram plots.")
+    ap.add_argument("--hist_bins", type=int, default=80,
+                    help="Number of histogram bins (log-spaced).")
+    ap.add_argument("--no_plot", action="store_true",
+                    help="Disable histogram plotting.")
     args = ap.parse_args()
 
     col_names = parse_cols_csv(args.col_name)
@@ -261,7 +299,21 @@ def main():
         if dump_f is not None:
             dump_f.close()
 
-        all_summaries[ds] = summarize(lengths, buckets)
+        summary = summarize(lengths, buckets)
+        all_summaries[ds] = summary
+
+        if not args.no_plot and lengths:
+            safe_name = ds.replace("/", "_")
+            out_path = os.path.join(args.plot_dir, f"{safe_name}.png")
+            title = (
+                f"{ds}  —  n_docs={len(lengths):,}  "
+                f"(mean={summary['mean']:,.0f}, "
+                f"p50={summary['p50']:,}, p99={summary['p99']:,}, "
+                f"max={summary['max']:,})"
+            )
+            plot_histogram(lengths, title, out_path, n_bins=args.hist_bins)
+
+        print(f"### Done: {ds}  ({len(lengths):,} docs)\n", flush=True)
 
     if args.out_json:
         with open(args.out_json, "w") as f:
