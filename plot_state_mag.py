@@ -59,6 +59,8 @@ REQUIRED_KEYS = (
 
 EPS = 1e-12
 RATIO_OCTAVE_CAP = 6.0   # cap log2-ratio color range at ±6 (= 64×) so outliers don't wash out
+DRIFT_NATS_CAP = 8.0     # cap |log-ratio| (natural log, "nats") drift heatmaps at this max
+PATTERN_DRIFT_CAP = 1.0  # cap (1 − cos_sim) within-group pattern-drift heatmaps at this max
 
 
 def load_npz(path: str) -> dict:
@@ -126,6 +128,25 @@ def resolve_attn_set(model_config_path: Optional[str],
         print(f"  using --attn-layer-idx fallback: {sorted(attn)}")
         return attn
     return set()
+
+
+def resolve_n_groups(model_config_path: Optional[str], fallback: int) -> int:
+    """Pull `mamba_n_groups` (or `n_groups`) from a HF config.json; else fallback.
+
+    For Nemotron-H 8B / Bamba this is `mamba_n_groups`; for pure Mamba2 it's
+    `n_groups`. Mamba2-only configs without either key fall back silently.
+    """
+    if model_config_path:
+        with open(model_config_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        for key in ("mamba_n_groups", "n_groups"):
+            if key in cfg:
+                ng = int(cfg[key])
+                print(f"  resolved n_groups={ng} from model-config[{key!r}]")
+                return ng
+        print(f"  no mamba_n_groups / n_groups key in model-config; "
+              f"using fallback n_groups={fallback}")
+    return fallback
 
 
 def _attn_follow_rows(layer_idx_arr: np.ndarray, attn_set: Set[int]) -> List[int]:
@@ -345,6 +366,248 @@ def plot_drift_hist(data: dict, name: str, out_dir: str) -> None:
     print(f"  wrote {path}")
 
 
+def _agg_per_head_mean_abs_log(mean: np.ndarray, ref_bins: int) -> np.ndarray:
+    """|log(mean_h(t) / median_first_refbins(mean_h))| averaged across heads → [L, n_bins].
+
+    "Typical head drift" — smooths over head-to-head spread, so a uniform
+    layer-wide shift shows up cleanly but a few catastrophic outlier heads
+    are diluted by the H-1 quiet ones.
+    """
+    log_mag = np.log(mean + EPS)                                              # [L, H, n_bins]
+    ref = np.median(log_mag[:, :, :ref_bins], axis=2, keepdims=True)          # [L, H, 1]
+    return np.abs(log_mag - ref).mean(axis=1)                                 # [L, n_bins]
+
+
+def _agg_per_head_max_abs_log(mean: np.ndarray, ref_bins: int) -> np.ndarray:
+    """max_h |log(mean_h(t) / median_first_refbins(mean_h))| → [L, n_bins].
+
+    "Worst head in the layer" — outlier-sensitive. A layer with even one
+    catastrophically drifting head registers immediately, regardless of how
+    quiet the other heads are.
+    """
+    log_mag = np.log(mean + EPS)
+    ref = np.median(log_mag[:, :, :ref_bins], axis=2, keepdims=True)
+    return np.abs(log_mag - ref).max(axis=1)                                  # [L, n_bins]
+
+
+def _agg_l2_total_abs_log(mean: np.ndarray, ref_bins: int) -> np.ndarray:
+    """|log(sqrt(sum_h ||h_h||²)(t) / median_first_refbins(total))| → [L, n_bins].
+
+    "RMSNorm-relevant total drift." The L2-aggregated total is exactly what
+    RMSNorm divides by (modulo a 1/sqrt(H·D) constant), so a single head
+    blowing up dominates `total_mag` the same way it dominates the post-norm
+    output direction.
+    """
+    total = np.sqrt((mean ** 2).sum(axis=1) + EPS)                            # [L, n_bins]
+    log_total = np.log(total + EPS)
+    ref = np.median(log_total[:, :ref_bins], axis=1, keepdims=True)           # [L, 1]
+    return np.abs(log_total - ref)                                            # [L, n_bins]
+
+
+def _agg_within_group_pattern_drift(
+    mean: np.ndarray, ref_bins: int, n_groups: int
+) -> np.ndarray:
+    """1 − cos_sim of within-group, mean-centered log-magnitude pattern vs early
+    context, averaged over groups → [L, n_bins].
+
+    Measures the RMSNorm-unabsorbable component of per-head magnitude drift.
+    Nemotron-H's MambaRMSNormGated has ngroups=8 over nheads=128 (group_size=16);
+    each group's RMS denominator absorbs uniform within-group scaling. What
+    remains — and what downstream layers see as a structurally different
+    direction — is the relative pattern of magnitudes among the 16 heads of
+    each group.
+
+    For each (layer, position, group):
+      v(t) = log(mean[layer, group_heads, t]) ∈ R^{group_size}
+      v(t) := v(t) - mean(v(t))     # remove uniform-scale component
+      v_ref similar from median over first `ref_bins` bins
+      drift = 1 - cosine(v(t), v_ref)
+    Then average drift across the n_groups groups in each layer.
+    """
+    L, H, n_bins = mean.shape
+    if H % n_groups != 0:
+        raise ValueError(f"H={H} not divisible by n_groups={n_groups}")
+    group_size = H // n_groups
+
+    log_mag = np.log(mean + EPS)                                                # [L, H, n_bins]
+    ref = np.median(log_mag[:, :, :ref_bins], axis=2)                           # [L, H]
+
+    log_mag_g = log_mag.reshape(L, n_groups, group_size, n_bins)                # [L, G, S, n_bins]
+    ref_g     = ref.reshape(L, n_groups, group_size)                            # [L, G, S]
+
+    cur_c = log_mag_g - log_mag_g.mean(axis=2, keepdims=True)                   # [L, G, S, n_bins]
+    ref_c = ref_g - ref_g.mean(axis=2, keepdims=True)                           # [L, G, S]
+
+    dot = (cur_c * ref_c[..., None]).sum(axis=2)                                # [L, G, n_bins]
+    cur_norm = np.linalg.norm(cur_c, axis=2)                                    # [L, G, n_bins]
+    ref_norm = np.linalg.norm(ref_c, axis=2, keepdims=True)                     # [L, G, 1]
+    cos_sim  = dot / (cur_norm * ref_norm + EPS)                                # [L, G, n_bins]
+
+    return (1.0 - cos_sim).mean(axis=1)                                         # [L, n_bins]
+
+
+def plot_layer_drift_panel(
+    loaded, out_path: str, ref_bins: int, n_groups: int,
+    attn_set: Set[int], train_len: Optional[int]
+) -> None:
+    """Multi-aggregator panel: rows = aggregators, cols = checkpoints.
+
+    Each cell is a [L, n_bins] heatmap on the magma colormap. One shared
+    colorbar per row (so the gap between e.g. mean-abs-log and L2-total is
+    *visible* — that gap itself diagnoses head-concentration of drift).
+
+    Aggregators (rows):
+      1. per-head mean |Δ log|       — typical head drift
+      2. L2-total |Δ log|            — RMSNorm-input scale drift
+      3. per-head max |Δ log|        — outlier-sensitive (worst head)
+      4. within-group pattern drift  — 1 − cos_sim of mean-centered log-mag
+                                       pattern within each RMSNorm group;
+                                       what RMSNorm cannot absorb.
+    """
+    N = len(loaded)
+    if N == 0:
+        return
+
+    aggregators = [
+        ("per-head mean |Δ log|",
+         lambda m: _agg_per_head_mean_abs_log(m, ref_bins),
+         DRIFT_NATS_CAP, "|Δ log| (nats)"),
+        ("L2-total |Δ log|",
+         lambda m: _agg_l2_total_abs_log(m, ref_bins),
+         DRIFT_NATS_CAP, "|Δ log| (nats)"),
+        ("per-head max |Δ log|",
+         lambda m: _agg_per_head_max_abs_log(m, ref_bins),
+         DRIFT_NATS_CAP, "|Δ log| (nats)"),
+        (f"within-group pattern drift\n(G={n_groups}, group_size={None})"
+         if any(d["mean"].shape[1] % n_groups for _, d in loaded)
+         else f"within-group pattern drift\n(G={n_groups}, group_size={loaded[0][1]['mean'].shape[1] // n_groups})",
+         lambda m: _agg_within_group_pattern_drift(m, ref_bins, n_groups),
+         PATTERN_DRIFT_CAP, "1 − cos_sim"),
+    ]
+    K = len(aggregators)
+
+    # Compute every cell's metric first so we can derive per-row vmax.
+    metrics: List[List[np.ndarray]] = []
+    for label, fn, _, _ in aggregators:
+        row = []
+        for _, data in loaded:
+            try:
+                row.append(fn(data["mean"]))
+            except ValueError as e:
+                print(f"  [skip drift-panel row {label!r}] {e}")
+                row.append(None)
+        metrics.append(row)
+
+    # Figure layout: K rows × (N + 1) cols, the trailing col holds colorbars.
+    L_max = max(data["mean"].shape[0] for _, data in loaded)
+    n_bins_max = max(data["mean"].shape[2] for _, data in loaded)
+    cell_w = max(4.5, n_bins_max * 0.075)
+    cell_h = max(2.6, L_max * 0.16)
+    fig = plt.figure(figsize=(cell_w * N + 1.6, cell_h * K + 0.5))
+    gs = fig.add_gridspec(K, N + 1, width_ratios=[*([1.0] * N), 0.05],
+                          hspace=0.40, wspace=0.18)
+
+    for r, (label, _, cap, cbar_label) in enumerate(aggregators):
+        row_metrics = [m for m in metrics[r] if m is not None]
+        if not row_metrics:
+            continue
+        row_max = max(float(m.max()) for m in row_metrics)
+        vmax = min(max(row_max, 1e-3), cap)
+
+        last_im = None
+        for c in range(N):
+            name, data = loaded[c]
+            metric = metrics[r][c]
+            if metric is None:
+                ax = fig.add_subplot(gs[r, c])
+                ax.text(0.5, 0.5, "(skipped)", ha="center", va="center",
+                        transform=ax.transAxes, color="gray")
+                ax.set_xticks([]); ax.set_yticks([])
+                continue
+            L, n_bins = metric.shape
+            bin_size = int(data["state_bin_size"])
+
+            ax = fig.add_subplot(gs[r, c])
+            im = ax.imshow(metric, aspect="auto", origin="lower",
+                           cmap="magma", vmin=0.0, vmax=vmax)
+            last_im = im
+
+            if r == 0:
+                ax.set_title(name, fontsize=10)
+            if r == K - 1:
+                ax.set_xlabel(f"position bin (bin_size={bin_size})")
+            else:
+                ax.set_xticklabels([])
+
+            if c == 0:
+                ax.set_yticks(np.arange(L))
+                ax.set_yticklabels([str(int(li)) for li in data["layer_idx"]],
+                                   fontsize=7)
+                ax.set_ylabel(f"{label}\nlayer", fontsize=9)
+                _color_attn_ticks(ax, data["layer_idx"], attn_set)
+            else:
+                ax.set_yticks([])
+
+            if train_len is not None:
+                x = _bin_for_train_len(train_len, bin_size)
+                if 0 <= x <= n_bins - 1:
+                    ax.axvline(x, color="cyan", linestyle="--", linewidth=0.8, alpha=0.85)
+
+        cax = fig.add_subplot(gs[r, N])
+        if last_im is not None:
+            fig.colorbar(last_im, cax=cax, label=cbar_label)
+
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
+def plot_quantile_fan(loaded, out_path: str, ref_bins: int = 4) -> None:
+    """Overlay per-head normalized magnitude quantile bands across checkpoints.
+
+    For each (layer, head), divide its trajectory by the median of its first
+    `ref_bins` position bins (its own early-context baseline). Pool all
+    (layer, head) curves and plot median + p25-p75 inner band + p10-p90 outer
+    band per checkpoint, all on the same axes.
+
+    loaded: list of (name, data) pairs, where data is the dict returned by load_npz.
+    """
+    fig, ax = plt.subplots(figsize=(9, 5))
+    colors = plt.cm.tab10.colors
+
+    for i, (name, data) in enumerate(loaded):
+        mean = data["mean"]                   # [L, H, n_bins]
+        positions = data["positions"]         # [n_bins]
+        L, H, n_bins = mean.shape
+        if n_bins < ref_bins:
+            print(f"  [skip fan] {name}: n_bins={n_bins} < ref_bins={ref_bins}")
+            continue
+
+        ref = np.median(mean[:, :, :ref_bins], axis=2, keepdims=True)  # [L, H, 1]
+        rel = mean / np.maximum(ref, 1e-12)                            # [L, H, n_bins]
+        flat = rel.reshape(L * H, n_bins)
+
+        med = np.median(flat, axis=0)
+        p10, p25, p75, p90 = (np.percentile(flat, q, axis=0) for q in (10, 25, 75, 90))
+
+        c = colors[i % len(colors)]
+        ax.fill_between(positions, p10, p90, color=c, alpha=0.15, linewidth=0)
+        ax.fill_between(positions, p25, p75, color=c, alpha=0.30, linewidth=0)
+        ax.plot(positions, med, color=c, linewidth=2.0, label=name)
+
+    ax.axhline(1.0, color="black", linewidth=0.6, linestyle=":")
+    ax.set_yscale("log")
+    ax.set_xlabel("position (tokens)")
+    ax.set_ylabel(r"$\|h\|_F$ / early-context baseline")
+    ax.set_title("Per-head SSM state magnitude relative to early context "
+                 "(median, p25-p75, p10-p90)")
+    ax.legend(loc="best")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"  wrote {out_path}")
+
+
 def plot_ratio_heatmap(
     base: dict, other: dict, base_name: str, other_name: str,
     out_dir: str, train_len: Optional[int], attn_set: Set[int]
@@ -416,6 +679,14 @@ def main():
     parser.add_argument("--head-reduce", choices=("median", "mean", "max"),
                         default="median",
                         help="How to collapse the head dim for layer_heatmap.png (default: median).")
+    parser.add_argument("--ref-bins", type=int, default=4,
+                        help="Number of leading bins to use as the early-context baseline for "
+                             "the layer-drift panel and quantile fan (default: 4).")
+    parser.add_argument("--n-groups", type=int, default=8,
+                        help="Number of RMSNorm groups (mamba_n_groups). Used by the within-group "
+                             "pattern-drift row of the drift panel. Auto-resolved from "
+                             "--model-config if available; this is the fallback (default: 8, "
+                             "matches Nemotron-H 8B / Bamba 9B).")
     parser.add_argument("--model-config", default=None,
                         help="Path to the model's HuggingFace config.json. Used to auto-resolve "
                              "attention layer indices via hybrid_override_pattern (Nemotron-H) or "
@@ -431,6 +702,8 @@ def main():
 
     print("Resolving attention layer set...")
     attn_set = resolve_attn_set(args.model_config, args.attn_layer_idx)
+    print("Resolving n_groups...")
+    n_groups = resolve_n_groups(args.model_config, args.n_groups)
 
     os.makedirs(args.out, exist_ok=True)
 
@@ -459,6 +732,13 @@ def main():
                            head_reduce=args.head_reduce)
         plot_layer_lines(data, name, sub_dir, args.train_len)
         plot_drift_hist(data, name, sub_dir)
+
+    if len(loaded) >= 1:
+        plot_quantile_fan(loaded, os.path.join(args.out, "quantile_fan.png"),
+                          ref_bins=args.ref_bins)
+        plot_layer_drift_panel(loaded, os.path.join(args.out, "layer_drift_panel.png"),
+                               ref_bins=args.ref_bins, n_groups=n_groups,
+                               attn_set=attn_set, train_len=args.train_len)
 
     if len(loaded) >= 2:
         base_name, base = loaded[0]
