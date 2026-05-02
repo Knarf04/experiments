@@ -54,6 +54,8 @@ FIELDS = {
     "erf":           "nheads",
     "state_cos_sim": "nheads x npos x npos",
     "state_mag_bin": "nheads x nbins",
+    "log_decay_cumulative": "nheads x nbins",
+    "state_inner_product":  "nheads x nbins",
 }
 
 
@@ -88,6 +90,12 @@ def compute_state_mag_stats(records, eps: float = 1e-12) -> dict:
     All input records must already share a single (seq_len, state_bin_size); the
     caller is responsible for filtering. Concatenates state_mag_bin across records
     and the within-record batch axis to produce one [N, H, n_bins] sample tensor.
+
+    If records also carry `log_decay_cumulative` and `state_inner_product` (the
+    geometric-extension diagnostic fields), this function additionally builds the
+    per-sample exact extended magnitudes ||α_t·S_k·h_T + h_t|| for k ∈ {1,2,3,∞}
+    and averages across the N samples (true mean of extended magnitudes, not
+    magnitude-of-mean-quantities).
     """
     arrays = [np.asarray(r["state_mag_bin"], dtype=np.float32) for r in records
               if "state_mag_bin" in r]
@@ -120,7 +128,7 @@ def compute_state_mag_stats(records, eps: float = 1e-12) -> dict:
         coeffs = np.polyfit(pos_f, log_mean[h, :], deg=1)
         log_slope[h] = float(coeffs[0])
 
-    return {
+    out = {
         "n_samples":      int(n_samples),
         "n_heads":        int(n_heads),
         "n_bins":         int(n_bins),
@@ -136,6 +144,54 @@ def compute_state_mag_stats(records, eps: float = 1e-12) -> dict:
         "drift_ratio":    drift_ratio.astype(np.float32),
         "log_slope":      log_slope.astype(np.float32),
     }
+
+    # ─── Geometric-extension diagnostic ────────────────────────────────────
+    # Per-sample exact construction: ||α_t·S_k·h_T + h_t||² =
+    #   (α_t·S_k)²·||h_T||² + ||h_t||² + 2·α_t·S_k·<h_T, h_t>_F
+    # then mean over the N samples.
+    have_geo = (all("log_decay_cumulative" in r for r in records)
+                and all("state_inner_product" in r for r in records))
+    if have_geo:
+        ld_arrays = [np.asarray(r["log_decay_cumulative"], dtype=np.float32) for r in records]
+        ip_arrays = [np.asarray(r["state_inner_product"],  dtype=np.float32) for r in records]
+        log_decay     = np.concatenate(ld_arrays, axis=0)                # [N, H, n_bins]
+        inner_product = np.concatenate(ip_arrays, axis=0)                # [N, H, n_bins]
+        if log_decay.shape != mag.shape or inner_product.shape != mag.shape:
+            raise ValueError(
+                f"geo-extension shape mismatch: state_mag_bin={mag.shape}, "
+                f"log_decay_cumulative={log_decay.shape}, "
+                f"state_inner_product={inner_product.shape}"
+            )
+
+        alpha_t = np.exp(log_decay)                                      # [N, H, n_bins]
+        alpha   = alpha_t[..., -1:]                                      # [N, H, 1]
+        hT_sq   = mag[..., -1:] ** 2                                     # [N, H, 1]
+        ht_sq   = mag ** 2                                               # [N, H, n_bins]
+
+        # Hardcoded geometric sums for small k avoid the (1-α^k)/(1-α) blowup near α≈1.
+        S_table = {
+            1:        np.ones_like(alpha),                               # k=2 ⇒ S_1 = 1
+            2:        1.0 + alpha,                                       # k=3 ⇒ S_2 = 1 + α
+            np.inf:   1.0 / (1.0 - alpha + 1e-6),                        # k=∞ ⇒ 1/(1-α)
+        }
+
+        clipped_total = 0
+        ext_mean = {}
+        for label, S in S_table.items():
+            coef = alpha_t * S                                           # [N, H, n_bins]
+            sq   = coef * coef * hT_sq + ht_sq + 2.0 * coef * inner_product
+            clipped_total += int(np.sum(sq < 0))
+            ext = np.sqrt(np.maximum(sq, 0.0))                           # [N, H, n_bins]
+            ext_mean[label] = ext.mean(axis=0).astype(np.float32)        # [H, n_bins]
+
+        out["ext_mean_k1"]   = mean.astype(np.float32)                   # ≡ existing `mean`
+        out["ext_mean_k2"]   = ext_mean[1]
+        out["ext_mean_k3"]   = ext_mean[2]
+        out["ext_mean_kinf"] = ext_mean[np.inf]
+        out["log_decay_mean"] = log_decay.mean(axis=0).astype(np.float32)
+        out["geo_clipped_neg_count"] = int(clipped_total)
+
+    return out
 
 
 def save_state_mag_npz(summaries, path: str) -> None:
@@ -178,8 +234,7 @@ def save_state_mag_npz(summaries, path: str) -> None:
     def stack(field):
         return np.stack([st[field] for _, st in by_layer], axis=0)
 
-    np.savez(
-        path,
+    save_kwargs = dict(
         layer_idx=layer_idx,
         positions=positions,
         seq_len=np.int64(seq_len),
@@ -194,7 +249,23 @@ def save_state_mag_npz(summaries, path: str) -> None:
         drift_ratio=stack("drift_ratio"),
         log_slope=stack("log_slope"),
     )
-    print(f"\nstate_mag stats saved to {path}  (L={len(by_layer)}, H={n_heads}, bins={n_bins})")
+
+    # Geo-extension fields are only present if the recorder emitted them. Save
+    # iff every selected layer has them, so the .npz schema stays consistent.
+    geo_keys = ("ext_mean_k1", "ext_mean_k2", "ext_mean_k3", "ext_mean_kinf",
+                "log_decay_mean")
+    if all(k in by_layer[0][1] for k in geo_keys) and \
+       all(all(k in st for k in geo_keys) for _, st in by_layer):
+        for k in geo_keys:
+            save_kwargs[k] = stack(k)
+        clipped = sum(int(st.get("geo_clipped_neg_count", 0)) for _, st in by_layer)
+        save_kwargs["geo_clipped_neg_count"] = np.int64(clipped)
+
+    np.savez(path, **save_kwargs)
+    have_geo = "ext_mean_kinf" in save_kwargs
+    geo_str = " (+geo-extension)" if have_geo else ""
+    print(f"\nstate_mag stats saved to {path}  "
+          f"(L={len(by_layer)}, H={n_heads}, bins={n_bins}){geo_str}")
 
 
 def load_layer(path: str, target_seq_len=None, target_bin_size=None) -> dict:
@@ -243,11 +314,15 @@ def load_layer(path: str, target_seq_len=None, target_bin_size=None) -> dict:
     sm_records = (_filter_records(records, sm_seq_len, sm_bin_size)
                   if has_state_mag else [])
 
+    # Fields whose shape depends on (seq_len, state_bin_size); aggregate only
+    # over the filtered, shape-compatible subset. Includes the geo-extension
+    # diagnostic fields, which share state_mag_bin's bin structure.
+    sm_dependent = {"state_mag_bin", "log_decay_cumulative", "state_inner_product"}
+
     for key in FIELDS:
         if key not in records[0]:
             continue
-        if key == "state_mag_bin":
-            # Aggregate only across the filtered, shape-compatible subset.
+        if key in sm_dependent:
             if not sm_records:
                 continue
             all_samples = np.concatenate(
@@ -331,7 +406,7 @@ def summaries_to_json(summaries: list[dict]) -> list[dict]:
                 entry[key] = np.asarray(s[key]).tolist()
         st = s.get("state_mag_stats")
         if st is not None:
-            entry["state_mag_stats"] = {
+            sub = {
                 "n_samples":      st["n_samples"],
                 "n_heads":        st["n_heads"],
                 "n_bins":         st["n_bins"],
@@ -347,6 +422,13 @@ def summaries_to_json(summaries: list[dict]) -> list[dict]:
                 "drift_ratio":    st["drift_ratio"].tolist(),
                 "log_slope":      st["log_slope"].tolist(),
             }
+            for k in ("ext_mean_k1", "ext_mean_k2", "ext_mean_k3",
+                      "ext_mean_kinf", "log_decay_mean"):
+                if k in st:
+                    sub[k] = st[k].tolist()
+            if "geo_clipped_neg_count" in st:
+                sub["geo_clipped_neg_count"] = int(st["geo_clipped_neg_count"])
+            entry["state_mag_stats"] = sub
         out.append(entry)
     return out
 
