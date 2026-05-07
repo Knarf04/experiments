@@ -141,7 +141,8 @@ def main():
     # Summary panel: median + percentile bands across layers
     # ------------------------------------------------------------------
     fig, axes = plt.subplots(1, 4, figsize=(11, 3.0), sharey=True)
-    for ax, (title, lags, arr, _) in zip(axes, panels):
+    panel_letters = "abcdefghijkl"
+    for letter, ax, (title, lags, arr, _) in zip(panel_letters, axes, panels):
         x = lags * args.sample_interval
         median = np.median(arr, axis=0)
         p25, p75 = np.percentile(arr, [25, 75], axis=0)
@@ -154,7 +155,6 @@ def main():
         ax.set_xlim(x.min(), x.max())
         ax.set_ylim(y_lo, y_hi)
         ax.set_xlabel('Position offset (tokens)')
-        ax.set_title(title)
         ax.xaxis.set_major_locator(MaxNLocator(nbins=args.max_xticks,
                                                steps=[1, 2, 5, 10],
                                                integer=True))
@@ -167,6 +167,9 @@ def main():
                 fontsize=8.5,
                 bbox=dict(boxstyle='round,pad=0.3', fc='white',
                           ec='#888', linewidth=0.5))
+        ax.text(0.5, -0.32, f'({letter}) {title}',
+                transform=ax.transAxes, ha='center', va='top',
+                fontsize=9.5)
 
     axes[0].set_ylabel(r'Retention score $L_{\mathrm{retention}}(k)$')
     axes[0].legend(loc='upper right', framealpha=0.95, frameon=True,
@@ -184,7 +187,7 @@ def main():
     cmap = cm.viridis
 
     max_n_layers = max(arr.shape[0] for _, _, arr, _ in panels)
-    for ax, (title, lags, arr, layer_indices) in zip(axes, panels):
+    for letter, ax, (title, lags, arr, layer_indices) in zip(panel_letters, axes, panels):
         x = lags * args.sample_interval
         n_layers = arr.shape[0]
         for i in range(n_layers):
@@ -194,13 +197,15 @@ def main():
         ax.set_xlim(x.min(), x.max())
         ax.set_ylim(y_lo, y_hi)
         ax.set_xlabel('Position offset (tokens)')
-        ax.set_title(title)
         ax.xaxis.set_major_locator(MaxNLocator(nbins=args.max_xticks,
                                                steps=[1, 2, 5, 10],
                                                integer=True))
         ax.xaxis.set_major_formatter(FuncFormatter(_format_k))
         ax.grid(True, alpha=0.25, linewidth=0.5)
         ax.set_axisbelow(True)
+        ax.text(0.5, -0.32, f'({letter}) {title}',
+                transform=ax.transAxes, ha='center', va='top',
+                fontsize=9.5)
 
     axes[0].set_ylabel(r'Retention score $L_{\mathrm{retention}}(k)$')
 
