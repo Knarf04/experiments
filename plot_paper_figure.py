@@ -168,7 +168,7 @@ def main():
                 fontsize=9.5)
 
     axes[0].set_ylabel(r'Retention score $L_{\mathrm{retention}}(k)$')
-    axes[0].legend(loc='upper right', framealpha=0.95, frameon=True,
+    axes[0].legend(loc='lower left', framealpha=0.95, frameon=True,
                    edgecolor='#888', fontsize=8)
 
     plt.tight_layout()
