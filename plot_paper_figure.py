@@ -130,17 +130,13 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Shared y-axis range from observed data (clip to [0, 1] visually)
-    all_min = min(arr.min() for _, _, arr, _ in panels)
-    all_max = max(arr.max() for _, _, arr, _ in panels)
-    pad = 0.05 * (all_max - all_min if all_max > all_min else 1.0)
-    y_lo = max(0.0, all_min - pad)
-    y_hi = min(1.0, all_max + pad)
+    # Shared y-axis range fixed to [0, 1] (cosine similarity bound).
+    y_lo, y_hi = 0.0, 1.0
 
     # ------------------------------------------------------------------
     # Summary panel: median + percentile bands across layers
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(1, 2, figsize=(11, 3.0), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(5.5, 3.0), sharey=True)
     panel_letters = "abcdefghijkl"
     for letter, ax, (title, lags, arr, _) in zip(panel_letters, axes, panels):
         x = lags * args.sample_interval
@@ -183,7 +179,7 @@ def main():
     # ------------------------------------------------------------------
     # Per-layer appendix figure: every layer drawn, viridis by layer index
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(1, 2, figsize=(12, 3.2), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(6.0, 3.2), sharey=True)
     cmap = cm.viridis
 
     max_n_layers = max(arr.shape[0] for _, _, arr, _ in panels)
