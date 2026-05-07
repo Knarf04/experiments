@@ -14,6 +14,19 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import cm, rcParams
+from matplotlib.ticker import FuncFormatter, MaxNLocator
+
+
+def _format_k(x, _pos):
+    """Format token-position values as compact 'Nk' / 'N.Mk' labels."""
+    if x <= 0:
+        return "0"
+    k = x / 1000.0
+    if k >= 10:
+        return f"{int(round(k))}k"
+    if abs(k - round(k)) < 1e-6:
+        return f"{int(round(k))}k"
+    return f"{k:g}k"
 
 
 rcParams['font.family'] = 'serif'
@@ -98,6 +111,12 @@ def main():
     parser.add_argument("--disp-name", type=str, default="retention_4panel",
                         help="Output filename stem (saved as <stem>.pdf and "
                              "<stem>_per_layer.pdf).")
+    parser.add_argument("--sample-interval", type=int, default=2048,
+                        help="Tokens per sampled position (state_sample_interval "
+                             "used at logging time). The x-axis is scaled by "
+                             "this factor and labeled in 'Nk' tokens.")
+    parser.add_argument("--max-xticks", type=int, default=6,
+                        help="Cap on the number of x-axis ticks per panel.")
     args = parser.parse_args()
 
     titles = args.titles or [
@@ -123,18 +142,23 @@ def main():
     # ------------------------------------------------------------------
     fig, axes = plt.subplots(1, 4, figsize=(11, 3.0), sharey=True)
     for ax, (title, lags, arr, _) in zip(axes, panels):
+        x = lags * args.sample_interval
         median = np.median(arr, axis=0)
         p25, p75 = np.percentile(arr, [25, 75], axis=0)
         p05, p95 = np.percentile(arr, [5, 95], axis=0)
-        ax.fill_between(lags, p05, p95, alpha=0.18, color='#1f77b4',
+        ax.fill_between(x, p05, p95, alpha=0.18, color='#1f77b4',
                         linewidth=0, label='5--95th pct')
-        ax.fill_between(lags, p25, p75, alpha=0.35, color='#1f77b4',
+        ax.fill_between(x, p25, p75, alpha=0.35, color='#1f77b4',
                         linewidth=0, label='25--75th pct')
-        ax.plot(lags, median, color='#0d3b66', linewidth=1.8, label='median')
-        ax.set_xlim(lags.min(), lags.max())
+        ax.plot(x, median, color='#0d3b66', linewidth=1.8, label='median')
+        ax.set_xlim(x.min(), x.max())
         ax.set_ylim(y_lo, y_hi)
-        ax.set_xlabel('Position offset $k$')
+        ax.set_xlabel('Position offset (tokens)')
         ax.set_title(title)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=args.max_xticks,
+                                               steps=[1, 2, 5, 10],
+                                               integer=True))
+        ax.xaxis.set_major_formatter(FuncFormatter(_format_k))
         ax.grid(True, alpha=0.25, linewidth=0.5)
         ax.set_axisbelow(True)
         v = layer_avg_variance(arr)
@@ -161,15 +185,20 @@ def main():
 
     max_n_layers = max(arr.shape[0] for _, _, arr, _ in panels)
     for ax, (title, lags, arr, layer_indices) in zip(axes, panels):
+        x = lags * args.sample_interval
         n_layers = arr.shape[0]
         for i in range(n_layers):
             denom = max(max_n_layers - 1, 1)
             color = cmap(i / denom)
-            ax.plot(lags, arr[i], color=color, linewidth=0.9, alpha=0.85)
-        ax.set_xlim(lags.min(), lags.max())
+            ax.plot(x, arr[i], color=color, linewidth=0.9, alpha=0.85)
+        ax.set_xlim(x.min(), x.max())
         ax.set_ylim(y_lo, y_hi)
-        ax.set_xlabel('Position offset $k$')
+        ax.set_xlabel('Position offset (tokens)')
         ax.set_title(title)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=args.max_xticks,
+                                               steps=[1, 2, 5, 10],
+                                               integer=True))
+        ax.xaxis.set_major_formatter(FuncFormatter(_format_k))
         ax.grid(True, alpha=0.25, linewidth=0.5)
         ax.set_axisbelow(True)
 
