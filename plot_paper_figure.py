@@ -1,6 +1,6 @@
 """
-Four-panel retention figure: plots model retention curves (across layers) for
-four training-stage summaries (e.g. 8k init -> 32k @500 -> 32k @6k -> 128k final).
+Two-panel retention figure: plots model retention curves (across layers) for
+two training-stage summaries (e.g. 32k @500 -> 128k final).
 
 Summary JSONs are loaded with the same logic as plot_retention_cos.py: each
 summary contains per-layer state_cos_sim of shape (H, npos, npos), which we
@@ -101,11 +101,11 @@ def layer_avg_variance(arr):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--summaries", type=str, nargs=4, required=True,
-                        metavar=("S1", "S2", "S3", "S4"),
-                        help="Four summary JSONs, plotted left-to-right.")
-    parser.add_argument("--titles", type=str, nargs=4, default=None,
-                        metavar=("T1", "T2", "T3", "T4"),
+    parser.add_argument("--summaries", type=str, nargs=2, required=True,
+                        metavar=("S1", "S2"),
+                        help="Two summary JSONs, plotted left-to-right.")
+    parser.add_argument("--titles", type=str, nargs=2, default=None,
+                        metavar=("T1", "T2"),
                         help="Panel titles (default: filename stems).")
     parser.add_argument("--output-dir", type=str, default="/gpfs/hshen/plots")
     parser.add_argument("--disp-name", type=str, default="retention_4panel",
@@ -140,7 +140,7 @@ def main():
     # ------------------------------------------------------------------
     # Summary panel: median + percentile bands across layers
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(1, 4, figsize=(11, 3.0), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(11, 3.0), sharey=True)
     panel_letters = "abcdefghijkl"
     for letter, ax, (title, lags, arr, _) in zip(panel_letters, axes, panels):
         x = lags * args.sample_interval
@@ -183,7 +183,7 @@ def main():
     # ------------------------------------------------------------------
     # Per-layer appendix figure: every layer drawn, viridis by layer index
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(1, 4, figsize=(12, 3.2), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 3.2), sharey=True)
     cmap = cm.viridis
 
     max_n_layers = max(arr.shape[0] for _, _, arr, _ in panels)
